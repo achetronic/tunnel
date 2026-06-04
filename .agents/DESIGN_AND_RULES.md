@@ -1,0 +1,41 @@
+# Design Decisions & Code Rules
+
+## 1. OS Agnosticism (VPS Edge)
+The VPS must be treated as a hostile and unknown environment. We do not depend on the limited versions of package managers for critical userspace components:
+- **Proxy (Envoy):** Installed via direct download of the precompiled static binary (`envoy-linux-amd64`) and orchestrated through an on-the-fly injected `systemd` unit. This ensures we run the exact same version on Debian, CentOS, RHEL, Arch, etc.
+- **WireGuard and nftables:** Applied natively by our own static Go binary `tunnelctl` (netlink + wgctrl for WireGuard, `google/nftables` for the DNAT ruleset), so nothing is installed on the host: no `wireguard-tools`, no `wg-quick`, no `nft` CLI, no package manager, no AppArmor-on-`wg` surface. The operator carries the binary (baked into its image, or a local build dir under `make run` via `--tunnelctl-dir`) and pushes the arch-matching one to the VPS over SSH; the VPS downloads nothing. The only host requirement is the WireGuard kernel module.
+- **SSH host key verification:** The enrollment channel is the root of trust (it generates the VPS WireGuard key, pushes config and installs Envoy), so it must not be MITM-able. `sshexec` verifies the VPS host key against the `knownHosts` entry of the SSH Secret (OpenSSH `known_hosts` format). Verification is on by default: with no `knownHosts` entry the operator refuses to connect unless `ssh.insecureSkipHostKeyVerification` is explicitly set on the EdgeNode. The dial is bounded by `ssh.connectTimeout` (default `30s`) so a reconcile worker never blocks indefinitely on an unreachable host.
+
+## 2. Observability & Debuggability (The Admin Bridge)
+Instead of exposing Envoy's admin port (9901) to the public Internet or complicating the VPS with extra software:
+- Envoy binds its administration panel strictly to the internal IP of the tunnel (`10.200.0.1:9901`).
+- The Kubernetes pods (Uplink) contain a `DNAT` rule in `nftables` that captures traffic destined for `9901` on the pod and redirects it through the tunnel to Envoy.
+- An `SNAT` (masquerade) is applied to that traffic so the VPS returns the response to the pod without needing static Kubernetes routes on the VPS.
+- **Design Decision:** This bridge is the official mechanism for both Prometheus metrics scraping and human debugging. Users can simply run `curl` against any uplink pod on port `9901` to access the full Envoy admin API (e.g., `/stats/prometheus`, `/config_dump`). We explicitly avoid building complex status summaries in the Custom Resource; raw, direct access to Envoy's API via this tunnel bridge is the intended architecture.
+
+## 3. File-Based Dynamic Configuration (xDS)
+- **Design Decision:** The operator manages the remote Envoy proxy via File-Based xDS (File System Subscriptions) to achieve zero-downtime reloads without the complexity of a gRPC Control Plane.
+- **Atomic Hot-Reload:** Envoy is bootstrapped once with an immutable `envoy.yaml` that watches `/etc/envoy/lds.yaml` and `/etc/envoy/cds.yaml`. The operator updates these files by writing a `.tmp` file and performing an atomic `mv`. Envoy detects the move via `inotify` and hot-reloads the configuration in RAM without dropping active L4 connections.
+- **Admin Bridge Debuggability:** Since the configuration lives dynamically, users must be able to debug it. The existing `nftables` bridge transparently proxies port `9901` from the uplink pods to the VPS Envoy admin interface. Users run `curl http://<uplink-pod>:9901/config_dump` to inspect the active configuration.
+
+## 4. TLS at the Edge (passthrough / offload / mutual)
+A TCP PortBinding may terminate or route TLS at the VPS via an optional `tls: { mode, secretRef }` block. The design keeps the user surface minimal and idiomatic:
+- **One `secretRef`, standard Secret.** It points at a `kubernetes.io/tls` Secret (exactly what cert-manager produces). The `mode` decides which keys are read from inside it: `tls.crt`+`tls.key` for `offload`/`mutual`, plus `ca.crt` for `mutual`. There is no second "clientCA" reference: the standard Secret already carries everything.
+- **Three modes, one decision: does the key leave the cluster?** `passthrough` inspects only the SNI and forwards the encrypted stream, so the private key never leaves the cluster. `offload` terminates TLS on the VPS. `mutual` is `offload` plus downstream client-certificate verification at the edge (toward the upstream traffic stays in clear; the operator does not originate mTLS to the cluster).
+- **Key-on-edge is an explicit, informed opt-in.** `offload`/`mutual` require copying the server private key to the VPS. This is a deliberate relaxation of the "VPS is a blind relay" rule, chosen because the user is accepting that trade-off knowingly. The operator makes it visible with a `PrivateKeyOnEdge` warning Event emitted only when the key is actually (re)written, and writes the file with a temp-path + `chmod 600` + atomic rename so it is never world-readable.
+- **Validation is split by what is knowable when.** CRD CEL validates spec shape (`tls` only on TCP; `secretRef` required for offload/mutual). Whether the Secret actually contains the needed keys is impossible to know at admission, so it is a runtime check during EdgeNode reconciliation (`TLSSecretIncomplete` Ready reason).
+- **Rotation is automatic.** The EdgeNodeReconciler watches Secrets; when a referenced TLS Secret changes, the affected EdgeNodes re-reconcile, the new cert is pushed and Envoy hot-reloads. TLS material participates in the `state.json` hash set so a rotation is detected as drift and a no-op when unchanged.
+
+## 5. Code Rules
+- **Determinism:** Every render (WireGuard, Envoy, Nftables) MUST generate a stable and identical hash for the same input (sorting slices before rendering).
+- **Functional Purity:** Business logic (`internal/planner`, `internal/render`) imports NOTHING from Kubernetes (`client-go`).
+- **Idempotency:** `internal/provision` only performs writes or restarts services if the generated hashes differ from what the remote `state.json` file reports. Service-stop commands use a trailing `|| true` to stay idempotent instead of swallowing genuine execution errors.
+- **Strict Error Handling:** No error discarding (`_ = err`), no error shadowing. Every error returned by production code MUST be explicitly checked and handled or wrapped and returned (`fmt.Errorf("...: %w", err)`). The only tolerated blank-assignment is in `_test.go` files for repeated deterministic-render calls whose error was already asserted on the first call.
+- **English Only:** All documentation, comments, variable names, logs and outputs must be written in English. No Spanish or other languages.
+- **Product Naming:** The project is named **Tunnel**. Do not reintroduce the name `tunnel-operator` in user-facing identifiers, labels or docs (the on-disk VPS state path `/etc/tunnel-operator/` is an internal implementation detail and is intentionally kept stable).
+- **No leaking use cases:** Product documentation describes capabilities and features generically. It must not reference concrete, development-revealing use cases (specific upstream products, nested-protocol scenarios, etc.).
+- **CRD changes are a three-part edit:** whenever you touch the API structs that generate the CRDs (`api/v1alpha1/*_types.go`), you MUST in the same change: (1) run `make manifests generate` to regenerate `config/crd/bases/*.yaml` and `zz_generated.deepcopy.go`, (2) sync those CRDs into the Helm chart (`deploy/helm/tunnel/crds/`), and (3) update the affected `config/samples/*.yaml` so the samples exercise the new/changed fields with sane example values and comments. A struct change that leaves the samples stale is incomplete.
+- **EdgeNode field order is fixed:** in the `EdgeNodeSpec` struct and in every example and prose that lists its fields (samples, README), keep this order: `address`, `ssh`, `edge`, `tunnel`, `uplink`. It is a deliberate readability convention; do not reorder it.
+
+## 6. Agents
+This `.agents/` folder contains the knowledge material the LLM must read to absorb context before altering the data path.

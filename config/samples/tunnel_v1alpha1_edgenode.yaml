@@ -1,0 +1,114 @@
+# EdgeNode is one VPS that acts as the public relay, plus the in-cluster uplink
+# replicas that build the WireGuard tunnels out to it. Create one per machine you
+# want to expose ports on. The operator SSHes in, installs Envoy and WireGuard,
+# and keeps everything reconciled.
+apiVersion: tunnel.achetronic.com/v1alpha1
+kind: EdgeNode
+metadata:
+  labels:
+    app.kubernetes.io/name: tunnel
+    app.kubernetes.io/managed-by: kustomize
+  name: edgenode-sample
+  namespace: default
+  # Optional operational annotations (set with `kubectl annotate edgenode ...`):
+  #   tunnel.achetronic.com/restart-envoy: "true"
+  #     One-shot: restart Envoy on the VPS on the next reconcile (apply a new
+  #     Envoy version). The operator removes the annotation once done.
+  #   tunnel.achetronic.com/skip-deprovision: "true"
+  #     On delete, skip the SSH teardown of the VPS (uplink resources are still
+  #     cleaned up).
+spec:
+  # Public IP (or hostname) of the VPS. The internet reaches your ports here, and
+  # the operator opens its SSH session here too. Required.
+  address: 203.0.113.10
+
+  # How the operator reaches the VPS over SSH to enroll and manage it.
+  ssh:
+    # TCP port of the VPS SSH daemon. Default: 22.
+    port: 22
+    # SSH login used for enrollment. Needs root (or passwordless sudo-equivalent)
+    # because it installs packages and writes systemd units. Default: root.
+    user: root
+    # How long to wait for the SSH connection before giving up, so a reconcile
+    # worker never blocks forever on an unreachable host. Default: 30s.
+    connectTimeout: 30s
+    # Set true to skip SSH host key verification. Leave false (the default) and
+    # provide a "knownHosts" entry in the Secret instead, otherwise the operator
+    # refuses to connect. Verification keeps the enrollment channel (which
+    # generates the VPS key and pushes config) safe from man-in-the-middle.
+    insecureSkipHostKeyVerification: false
+    # Secret holding the SSH credentials. Credentials are NEVER inlined here.
+    # Expected keys:
+    #   - privateKey  : PEM private key (recommended), or
+    #   - password    : SSH password
+    #   - passphrase  : optional passphrase for an encrypted privateKey
+    #   - knownHosts  : recommended OpenSSH known_hosts content to pin the host
+    #                   key, e.g. the output of `ssh-keyscan 203.0.113.10`
+    secretRef:
+      name: vps-ssh-secret
+      # Namespace of the Secret. Defaults to the EdgeNode namespace when omitted.
+      namespace: default
+
+  # The VPS-side edge proxy (Envoy): how it health checks the uplink replicas and
+  # fails over between them. Optional block; all fields shown with their defaults.
+  edge:
+    healthCheck:
+      # Time between the probes Envoy sends to each replica's /ready endpoint.
+      # Default: 5s.
+      interval: 5s
+      # How long each probe may take before it counts as a failure. Default: 2s.
+      timeout: 2s
+      # Consecutive successful probes before a replica is put back into rotation.
+      # Default: 2.
+      healthyThreshold: 2
+      # Consecutive failed probes before a replica is taken out of rotation, so a
+      # replica whose tunnel is down stops receiving traffic instead of
+      # black-holing it. Default: 2.
+      unhealthyThreshold: 2
+
+  # WireGuard overlay between the cluster and the VPS. All fields are optional and
+  # shown here with their defaults.
+  tunnel:
+    # UDP port where the VPS WireGuard relay listens for the tunnels the cluster
+    # dials out to. Must not collide with any PortBinding listenPort on this node.
+    # Default: 51821.
+    listenPort: 51821
+    # CIDR of the private overlay. The VPS relay takes ".1", and each uplink
+    # replica takes ".2 + its ordinal" (uplink-0 gets .2, uplink-1 gets .3, ...).
+    # Default: 10.200.0.0/24.
+    network: 10.200.0.0/24
+    # MTU of the WireGuard interfaces on both ends. 1420 is the safe value for
+    # internet transport (leaves room for the WireGuard headers). Default: 1420.
+    mtu: 1420
+    # Seconds between WireGuard keepalive packets sent by the uplink, keeping
+    # stateful firewalls/NATs open so the outbound tunnel stays up. Default: 25.
+    persistentKeepalive: 25
+
+  # The in-cluster side of the tunnel: a StatefulSet of replicas that terminate
+  # the WireGuard tunnels and apply the DNAT rules.
+  uplink:
+    # Namespace where the uplink StatefulSet, ConfigMap and keys Secret are
+    # created. Default: tunnel.
+    namespace: tunnel
+    # Number of active-active replicas. Each one is an independent WireGuard peer,
+    # and Envoy load-balances across the healthy tunnels, so more than one gives
+    # you HA and a replica restart never drops the public port. Default: 1.
+    replicas: 2
+    # Extra labels added to the uplink Pods.
+    labels:
+      environment: production
+    # Extra annotations added to the uplink Pods, e.g. Prometheus scraping of the
+    # Envoy admin metrics bridged through the tunnel.
+    annotations:
+      prometheus.io/scrape: "true"
+    # Compute resources for the uplink container.
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "128Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+    # Other scheduling fields you can set here (left out of this sample):
+    # nodeSelector, tolerations and affinity. If affinity is unset it defaults to
+    # pod anti-affinity by hostname, spreading replicas across nodes.

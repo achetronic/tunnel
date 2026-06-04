@@ -1,0 +1,17 @@
+# Uplink identity transforms (applied by `tunnelctl run --transforms`).
+#
+# The planner ships one shared uplink document (the same ConfigMap for every
+# replica) with an empty interface address and private key. These CEL rules fill
+# in each replica's own identity at runtime: the StatefulSet ordinal is parsed
+# from POD_NAME, the tunnel address is the (2 + ordinal)-th host of the overlay
+# network the document already carries, and the private key is read from the
+# per-ordinal file mounted from the uplink keys Secret.
+transforms:
+  - path: wireguard.interface.address
+    expr: |
+      cel.bind(parts, getenv("POD_NAME").split("-"),
+        cidrHost(config.nftables.tunnelNetwork, 2 + int(parts[size(parts) - 1])) + "/32")
+  - path: wireguard.interface.privateKey
+    expr: |
+      cel.bind(parts, getenv("POD_NAME").split("-"),
+        readFile(getenv("KEYS_DIR") + "/priv-" + parts[size(parts) - 1]).trim())

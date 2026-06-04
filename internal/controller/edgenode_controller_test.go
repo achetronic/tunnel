@@ -1,0 +1,371 @@
+/*
+Copyright 2026 achetronic.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"strings"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	tunnelv1alpha1 "github.com/achetronic/tunnel/api/v1alpha1"
+	"github.com/achetronic/tunnel/internal/sshexec"
+)
+
+// activeServiceOutput is the systemctl output for a running service.
+const activeServiceOutput = "active\n"
+
+// healthyFakeExecutor returns a FakeExecutor whose RunFunc answers the probes
+// issued during provisioning with a healthy VPS.
+func healthyFakeExecutor() *sshexec.FakeExecutor {
+	fake := sshexec.NewFakeExecutor()
+	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "which apt"):
+			return "/usr/bin/apt", nil
+		case strings.Contains(cmd, "uname -m"):
+			return "x86_64", nil
+		case strings.Contains(cmd, "tunnelctl status"):
+			return `{"interface":"wg-relay","exists":true,"up":true,"ready":true,"detail":"healthy","peers":[]}`, nil
+		case strings.Contains(cmd, "systemctl is-active"):
+			return activeServiceOutput, nil
+		case strings.Contains(cmd, "state.json"):
+			return "{}", nil
+		case strings.Contains(cmd, "vps.pub"):
+			return "fakevpspublickey", nil
+		case strings.Contains(cmd, "vps.priv"):
+			return "fakevpsprivatekey", nil
+		default:
+			return "", nil
+		}
+	}
+	return fake
+}
+
+// envoyFailedFakeExecutor returns a FakeExecutor that lets enrollment proceed
+// but reports the envoy unit as failed, simulating a crash-looping proxy (for
+// example a bad config). The reconciler must surface this as a provisioning
+// failure instead of certifying a dead proxy.
+func envoyFailedFakeExecutor() *sshexec.FakeExecutor {
+	fake := sshexec.NewFakeExecutor()
+	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "which apt"):
+			return "/usr/bin/apt", nil
+		case strings.Contains(cmd, "uname -m"):
+			return "x86_64", nil
+		case strings.TrimSpace(cmd) == "systemctl is-active envoy":
+			return "failed\n", nil
+		case strings.Contains(cmd, "tunnelctl status"):
+			return `{"interface":"wg-relay","exists":true,"up":true,"ready":true,"detail":"healthy","peers":[]}`, nil
+		case strings.Contains(cmd, "systemctl is-active"):
+			return activeServiceOutput, nil
+		case strings.Contains(cmd, "state.json"):
+			return "{}", nil
+		case strings.Contains(cmd, "vps.pub"):
+			return "fakevpspublickey", nil
+		case strings.Contains(cmd, "vps.priv"):
+			return "fakevpsprivatekey", nil
+		default:
+			return "", nil
+		}
+	}
+	return fake
+}
+
+var _ = Describe("EdgeNode Controller", func() {
+	Context("When reconciling a resource", func() {
+		const resourceName = "test-resource"
+
+		ctx := context.Background()
+
+		typeNamespacedName := types.NamespacedName{
+			Name:      resourceName,
+			Namespace: "default",
+		}
+		edgenode := &tunnelv1alpha1.EdgeNode{}
+
+		BeforeEach(func() {
+			By("creating the custom resource for the Kind EdgeNode")
+			err := k8sClient.Get(ctx, typeNamespacedName, edgenode)
+			if err != nil && errors.IsNotFound(err) {
+				secret := &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "fake-secret",
+						Namespace: "default",
+					},
+					Data: map[string][]byte{
+						"password": []byte("test"),
+					},
+				}
+				if err := k8sClient.Create(ctx, secret); err != nil && !errors.IsAlreadyExists(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
+
+				ns := &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "tunnel",
+					},
+				}
+				err := k8sClient.Create(ctx, ns)
+				if err != nil && !errors.IsAlreadyExists(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
+
+				resource := &tunnelv1alpha1.EdgeNode{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      resourceName,
+						Namespace: "default",
+					},
+					Spec: tunnelv1alpha1.EdgeNodeSpec{
+						Address: "198.51.100.10",
+						SSH: tunnelv1alpha1.SSHSpec{
+							SecretRef: tunnelv1alpha1.SecretReference{
+								Name: "fake-secret",
+							},
+						},
+						Uplink: tunnelv1alpha1.UplinkSpec{
+							Namespace: "tunnel",
+							Replicas:  1,
+						},
+					},
+				}
+				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
+			}
+		})
+
+		AfterEach(func() {
+			resource := &tunnelv1alpha1.EdgeNode{}
+			err := k8sClient.Get(ctx, typeNamespacedName, resource)
+			if errors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Cleanup the specific resource instance EdgeNode")
+			if resource.Annotations == nil {
+				resource.Annotations = map[string]string{}
+			}
+			resource.Annotations["tunnel.achetronic.com/skip-deprovision"] = annotationTrue
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+
+			cleanupReconciler := &EdgeNodeReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+			_, _ = cleanupReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+
+			cleanup := &tunnelv1alpha1.EdgeNode{}
+			if err := k8sClient.Get(ctx, typeNamespacedName, cleanup); err == nil {
+				cleanup.Finalizers = nil
+				_ = k8sClient.Update(ctx, cleanup)
+				_ = k8sClient.Delete(ctx, cleanup)
+			}
+		})
+
+		It("should successfully reconcile the resource", func() {
+			By("Reconciling the created resource with a healthy fake executor")
+			controllerReconciler := &EdgeNodeReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				TunnelctlDir: tunnelctlTestDir,
+				ExecutorFactory: func(ctx context.Context, node *tunnelv1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error) {
+					return healthyFakeExecutor(), nil
+				},
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			updated := &tunnelv1alpha1.EdgeNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			Expect(updated.Status.ObservedGeneration).To(Equal(updated.Generation))
+			cond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+		})
+
+		It("should mark Ready False with SSHConnectionFailed when the SSH secret is absent", func() {
+			By("pointing the EdgeNode at a non-existent SSH secret")
+			node := &tunnelv1alpha1.EdgeNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			node.Spec.SSH.SecretRef.Name = "does-not-exist"
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			controllerReconciler := &EdgeNodeReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).To(HaveOccurred())
+
+			updated := &tunnelv1alpha1.EdgeNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("SSHConnectionFailed"))
+		})
+
+		It("should mark Ready False with ProvisioningFailed when envoy does not come up", func() {
+			By("Reconciling with a fake executor whose envoy unit stays failed")
+			controllerReconciler := &EdgeNodeReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				TunnelctlDir: tunnelctlTestDir,
+				ExecutorFactory: func(ctx context.Context, node *tunnelv1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error) {
+					return envoyFailedFakeExecutor(), nil
+				},
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).To(HaveOccurred())
+
+			updated := &tunnelv1alpha1.EdgeNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			cond := meta.FindStatusCondition(updated.Status.Conditions, "Ready")
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal("ProvisioningFailed"))
+		})
+
+		It("should tear down via the fake executor on deletion with a finalizer", func() {
+			By("first reconciling so the finalizer is added")
+			controllerReconciler := &EdgeNodeReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				TunnelctlDir: tunnelctlTestDir,
+				ExecutorFactory: func(ctx context.Context, node *tunnelv1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error) {
+					return healthyFakeExecutor(), nil
+				},
+			}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("deleting the EdgeNode and reconciling the teardown")
+			node := &tunnelv1alpha1.EdgeNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, node)).To(Succeed())
+
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			gone := &tunnelv1alpha1.EdgeNode{}
+			err = k8sClient.Get(ctx, typeNamespacedName, gone)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should consume the restart-envoy annotation on reconcile", func() {
+			By("annotating the EdgeNode to request an Envoy restart")
+			node := &tunnelv1alpha1.EdgeNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, node)).To(Succeed())
+			if node.Annotations == nil {
+				node.Annotations = map[string]string{}
+			}
+			node.Annotations["tunnel.achetronic.com/restart-envoy"] = annotationTrue
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			controllerReconciler := &EdgeNodeReconciler{
+				Client:       k8sClient,
+				Scheme:       k8sClient.Scheme(),
+				TunnelctlDir: tunnelctlTestDir,
+				ExecutorFactory: func(ctx context.Context, node *tunnelv1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error) {
+					return healthyFakeExecutor(), nil
+				},
+			}
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the annotation was consumed (removed) by the operator")
+			updated := &tunnelv1alpha1.EdgeNode{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
+			_, present := updated.Annotations["tunnel.achetronic.com/restart-envoy"]
+			Expect(present).To(BeFalse())
+		})
+	})
+})
+
+var _ = Describe("ensureUplinkKeys", func() {
+	ctx := context.Background()
+	const ns = "tunnel"
+
+	newReconciler := func() *EdgeNodeReconciler {
+		return &EdgeNodeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	}
+	newNode := func(name string) *tunnelv1alpha1.EdgeNode {
+		return &tunnelv1alpha1.EdgeNode{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: tunnelv1alpha1.EdgeNodeSpec{
+				Uplink: tunnelv1alpha1.UplinkSpec{Namespace: ns},
+			},
+		}
+	}
+
+	BeforeEach(func() {
+		nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}
+		if err := k8sClient.Create(ctx, nsObj); err != nil && !errors.IsAlreadyExists(err) {
+			Expect(err).NotTo(HaveOccurred())
+		}
+	})
+
+	It("adds keys on scale up and prunes them on scale down without rotating existing ones", func() {
+		r := newReconciler()
+		node := newNode("scale-test")
+
+		By("creating the secret with a single replica")
+		sec, err := r.ensureUplinkKeys(ctx, node, 1, ns)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Data).To(HaveKey("priv-0"))
+		Expect(sec.Data).NotTo(HaveKey("priv-1"))
+		original := string(sec.Data["priv-0"])
+
+		By("scaling up to three replicas")
+		sec, err = r.ensureUplinkKeys(ctx, node, 3, ns)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Data).To(HaveKey("priv-0"))
+		Expect(sec.Data).To(HaveKey("priv-1"))
+		Expect(sec.Data).To(HaveKey("priv-2"))
+		Expect(string(sec.Data["priv-0"])).To(Equal(original), "an existing ordinal must keep its key")
+
+		By("resolving public keys for every replica (the bug surfaced here)")
+		_, err = r.resolveUplinkPublicKeys(sec, 3)
+		Expect(err).NotTo(HaveOccurred())
+
+		By("scaling back down to two replicas")
+		sec, err = r.ensureUplinkKeys(ctx, node, 2, ns)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(sec.Data).To(HaveKey("priv-0"))
+		Expect(sec.Data).To(HaveKey("priv-1"))
+		Expect(sec.Data).NotTo(HaveKey("priv-2"))
+		Expect(string(sec.Data["priv-0"])).To(Equal(original))
+	})
+})

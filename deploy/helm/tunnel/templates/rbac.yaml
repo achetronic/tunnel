@@ -1,0 +1,211 @@
+{{- if .Values.rbac.create }}
+---
+# ClusterRole: manager-role
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/rbac/role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tunnel.fullname" . }}-manager
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - secrets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apps
+    resources:
+      - statefulsets
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - tunnel.achetronic.com
+    resources:
+      - edgenodes
+      - portbindings
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - tunnel.achetronic.com
+    resources:
+      - edgenodes/finalizers
+      - portbindings/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - tunnel.achetronic.com
+    resources:
+      - edgenodes/status
+      - portbindings/status
+    verbs:
+      - get
+      - patch
+      - update
+---
+# ClusterRoleBinding: manager-rolebinding
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/rbac/role_binding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tunnel.fullname" . }}-manager
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "tunnel.fullname" . }}-manager
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tunnel.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# Role: leader-election-role, namespaced to the release namespace.
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/rbac/leader_election_role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tunnel.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+---
+# RoleBinding: leader-election-rolebinding (namespaced).
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/rbac/leader_election_role_binding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tunnel.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tunnel.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tunnel.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# ClusterRole: metrics-auth-role. Lets the manager authn/authz requests to the metrics endpoint.
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/rbac/metrics_auth_role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tunnel.fullname" . }}-metrics-auth
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - authentication.k8s.io
+    resources:
+      - tokenreviews
+    verbs:
+      - create
+  - apiGroups:
+      - authorization.k8s.io
+    resources:
+      - subjectaccessreviews
+    verbs:
+      - create
+---
+# ClusterRoleBinding: metrics-auth-rolebinding
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/rbac/metrics_auth_role_binding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "tunnel.fullname" . }}-metrics-auth
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "tunnel.fullname" . }}-metrics-auth
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tunnel.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+# ClusterRole: metrics-reader. Read access to /metrics; bind it to your Prometheus ServiceAccount.
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/rbac/metrics_reader_role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "tunnel.fullname" . }}-metrics-reader
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs:
+      - "/metrics"
+    verbs:
+      - get
+{{- end }}

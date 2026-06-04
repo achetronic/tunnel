@@ -1,0 +1,166 @@
+{{- $imageTag := default .Chart.AppVersion .Values.image.tag -}}
+{{- $hasMetricsTLS := .Values.metrics.tls.secretName -}}
+{{- $hasExtraVolumeMounts := .Values.extraVolumeMounts -}}
+{{- $hasExtraVolumes := .Values.extraVolumes -}}
+{{- $healthPort := .Values.flags.healthProbeBindAddress | toString | splitList ":" | last -}}
+{{- $metricsOn := ne (.Values.flags.metricsBindAddress | toString) "0" -}}
+{{- $metricsPort := .Values.flags.metricsBindAddress | toString | splitList ":" | last -}}
+# Deployment for the Tunnel operator controller manager.
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/manager/manager.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tunnel.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tunnel.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "tunnel.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "tunnel.serviceAccountName" . }}
+      {{- with .Values.podSecurityContext }}
+      # Ref: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: manager
+          # Ref: https://github.com/achetronic/tunnel/pkgs/container/tunnel%2Fcontroller
+          image: "{{ .Values.image.repository }}:{{ $imageTag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /manager
+          args:
+            # Each flags map entry becomes --<kebab-key>=<value>. Empty strings are
+            # skipped (binary default); booleans are always emitted.
+            {{- range $k, $v := .Values.flags }}
+            {{- if eq $k "imageTag" }}
+            # imageTag is special: empty falls back to the controller image tag
+            # so the uplink image stays in lockstep with it.
+            - --image-tag={{ $v | default $imageTag }}
+            {{- else if or (kindIs "bool" $v) (not (empty $v)) }}
+            - --{{ kebabcase $k }}={{ $v }}
+            {{- end }}
+            {{- end }}
+            {{- if $hasMetricsTLS }}
+            # Metrics TLS cert path (see the volume mounted below).
+            # Ref: https://github.com/achetronic/tunnel/blob/main/config/default/cert_metrics_manager_patch.yaml
+            - --metrics-cert-path=/tmp/k8s-metrics-server/metrics-certs
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            # Each env map entry becomes NAME=value with the key upper-snake-cased.
+            {{- range $k, $v := .Values.env }}
+            - name: {{ snakecase $k | upper }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            # Probe port derived from flags.healthProbeBindAddress.
+            - name: health
+              containerPort: {{ $healthPort }}
+              protocol: TCP
+            {{- if $metricsOn }}
+            # Metrics HTTPS port derived from flags.metricsBindAddress.
+            - name: https
+              containerPort: {{ $metricsPort }}
+              protocol: TCP
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ $healthPort }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ $healthPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          {{- with .Values.securityContext }}
+          # Ref: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          # Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or $hasMetricsTLS $hasExtraVolumeMounts }}
+          volumeMounts:
+            {{- if $hasMetricsTLS }}
+            # TLS credentials for the metrics server.
+            # Ref: https://github.com/achetronic/tunnel/blob/main/config/default/cert_metrics_manager_patch.yaml
+            - name: metrics-certs
+              mountPath: /tmp/k8s-metrics-server/metrics-certs
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or $hasMetricsTLS $hasExtraVolumes }}
+      volumes:
+        {{- if $hasMetricsTLS }}
+        # Secret volume for the metrics server TLS certificate.
+        # The secret must contain keys: ca.crt, tls.crt, tls.key.
+        - name: metrics-certs
+          secret:
+            secretName: {{ .Values.metrics.tls.secretName }}
+            optional: false
+            items:
+              - key: ca.crt
+                path: ca.crt
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

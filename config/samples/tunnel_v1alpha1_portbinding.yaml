@@ -1,0 +1,123 @@
+# PortBinding declares which public ports to open on an EdgeNode and where the
+# traffic goes inside the cluster. They are the doors you cut into the VPS. You
+# can have many PortBindings per EdgeNode; they just reference the same node.
+# Adding or removing one hot-reloads Envoy on the VPS without dropping live
+# sessions.
+apiVersion: tunnel.achetronic.com/v1alpha1
+kind: PortBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: tunnel
+    app.kubernetes.io/managed-by: kustomize
+  name: portbinding-sample
+  namespace: default
+spec:
+  # Which EdgeNode exposes these ports. This is the only link between the two
+  # resources; their lifecycles stay independent.
+  edgeNodeRef:
+    # Name of the EdgeNode. Required.
+    name: edgenode-sample
+    # Namespace of the EdgeNode. Defaults to this PortBinding's namespace when
+    # omitted, so you can leave it out when both live together.
+    # namespace: default
+
+  # The list of ports to expose. Each entry maps one public port on the VPS to
+  # one in-cluster target. Every listenPort must be unique across all
+  # PortBindings pointing at the same EdgeNode, and differ from tunnel.listenPort.
+  bindings:
+    # A TCP door routed to an in-cluster Service.
+    - # Unique name for this binding within the PortBinding. Required.
+      name: https-web
+      # TCP or UDP. Decides which of the tcp/udp blocks below is valid; mixing
+      # them is rejected at admission time. Required.
+      protocol: TCP
+      # Public port opened on the VPS (1-65535). Required.
+      listenPort: 443
+      # TCP-only tuning. Only allowed when protocol is TCP.
+      tcp:
+        # Prepend a Proxy Protocol v1 header so the backend sees the real client
+        # IP instead of the tunnel's. Default: false.
+        proxyProtocol: true
+        # How long Envoy waits to establish the upstream connection. Default: 5s.
+        connectTimeout: 5s
+        # Idle timeout for established TCP sessions. Default: 1h.
+        idleTimeout: 1h
+      # Where the traffic goes after leaving the tunnel. Set exactly one of
+      # `service` or `address` (a CEL rule enforces it).
+      target:
+        # Point at an in-cluster Service. The operator resolves it to its current
+        # ClusterIP at render time.
+        service:
+          name: internal-ingress
+          namespace: networking
+          port: 443
+
+    # A UDP door routed straight to a raw IP.
+    - name: dns-udp
+      protocol: UDP
+      listenPort: 53
+      # UDP-only tuning. Only allowed when protocol is UDP.
+      udp:
+        # Idle timeout for UDP sessions. Keep it larger than the keepalive of
+        # whatever you tunnel, or flows get torn down too early. Default: 60s.
+        sessionTimeout: 60s
+      target:
+        # Forward to a raw IP instead of a Service. `port` is required here.
+        address: 10.96.0.10
+        port: 53
+
+    # A TLS passthrough door. Envoy inspects the TLS SNI and routes the stream
+    # WITHOUT decrypting it, so the private key never leaves the cluster. No
+    # Secret is needed on the VPS. Use this when you want the backend to keep
+    # terminating TLS itself and only need the VPS to forward by hostname.
+    - name: https-passthrough
+      protocol: TCP
+      listenPort: 8443
+      tls:
+        # passthrough | offload | mutual. Only valid on TCP bindings.
+        mode: passthrough
+      target:
+        service:
+          name: internal-ingress
+          namespace: networking
+          port: 443
+
+    # A TLS offload door. Envoy TERMINATES TLS on the VPS and forwards plain
+    # traffic to the upstream. This copies the server certificate's private key
+    # to the VPS (you opt into key-on-edge); the operator emits a
+    # PrivateKeyOnEdge warning event when it does. secretRef is required.
+    - name: https-offload
+      protocol: TCP
+      listenPort: 9443
+      tls:
+        mode: offload
+        # A standard kubernetes.io/tls Secret (e.g. produced by cert-manager).
+        # offload reads tls.crt and tls.key from it. Namespace defaults to this
+        # PortBinding's namespace when omitted.
+        secretRef:
+          name: web-tls
+          namespace: default
+      target:
+        service:
+          name: web
+          namespace: default
+          port: 8080
+
+    # A mutual-TLS door. Same as offload, plus Envoy verifies the client
+    # certificate at the edge against ca.crt from the same Secret. Traffic
+    # toward the upstream stays in clear (no mTLS to the backend). secretRef is
+    # required and the Secret must also carry ca.crt.
+    - name: grpc-mtls
+      protocol: TCP
+      listenPort: 9444
+      tls:
+        mode: mutual
+        # kubernetes.io/tls Secret carrying tls.crt, tls.key and ca.crt.
+        secretRef:
+          name: grpc-mtls
+          namespace: default
+      target:
+        service:
+          name: grpc-api
+          namespace: default
+          port: 50051

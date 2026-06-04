@@ -1,0 +1,31 @@
+# Build the tunnelctl agent binary
+FROM golang:1.25 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+
+WORKDIR /workspace
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# The uplink runs the same generic tunnelctl agent the edge uses. It configures
+# WireGuard and nftables natively (netlink + wgctrl + google/nftables), so it
+# needs no wireguard-tools, nftables CLI or iproute2 at runtime: a static binary
+# on distroless is enough. CAP_NET_ADMIN (granted by the pod securityContext) and
+# the host WireGuard kernel module are the only runtime requirements.
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -a -ldflags "-s -w -X github.com/achetronic/tunnel/internal/version.Version=${VERSION}" -o tunnelctl ./cmd/tunnelctl
+
+# It runs as root: creating the WireGuard link and programming nftables via
+# netlink needs an effective CAP_NET_ADMIN, which a non-root uid does not get
+# even in a privileged pod.
+FROM gcr.io/distroless/static:latest
+WORKDIR /
+COPY --from=builder /workspace/tunnelctl /usr/local/bin/tunnelctl
+# The per-replica identity transforms (parse the ordinal from POD_NAME, derive
+# the tunnel address and read the private key) the uplink applies on top of the
+# shared desired-state document.
+COPY assets/uplink.transforms.yaml /etc/tunnelctl/uplink.transforms.yaml
+
+ENTRYPOINT ["/usr/local/bin/tunnelctl"]

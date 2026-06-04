@@ -1,0 +1,21 @@
+resources:
+  - "@type": type.googleapis.com/envoy.config.listener.v3.Listener
+    name: listener_https_pt
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 443
+    listener_filters:
+      - name: envoy.filters.listener.tls_inspector
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+    filter_chains:
+      - filter_chain_match:
+          server_names:
+            - "*"
+        filters:
+          - name: envoy.filters.network.tcp_proxy
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
+              stat_prefix: tcp_https_pt
+              cluster: cluster_https_pt

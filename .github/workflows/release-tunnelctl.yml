@@ -1,0 +1,106 @@
+name: Release tunnelctl
+
+# Builds the static tunnelctl binary (amd64 + arm64) and uploads it to the
+# assets of the release that triggered the run, so the operator can download the
+# matching binary by version and architecture and push it to the VPS over SSH.
+# Runs when a Release is published, or manually with a semver and an optional
+# "build from the default branch" toggle.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to build and attach (e.g. 1.2.3 or v1.2.3). The release must already exist for a manual run.
+        required: true
+        type: string
+      from_master:
+        description: Build from the default branch HEAD instead of the version tag. Artifacts are still attached to the version release.
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: release-tunnelctl-${{ github.event.release.tag_name || github.event.inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and attach tunnelctl
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve version and ref
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_FROM_MASTER: ${{ inputs.from_master }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "release" ]; then
+            RAW="$RELEASE_TAG"
+          else
+            RAW="$IN_VERSION"
+          fi
+          VERSION="${RAW#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$RAW' is not a valid semantic version"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_FROM_MASTER" = "true" ]; then
+            REF="$DEFAULT_BRANCH"
+          else
+            REF="$TAG"
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Attaching tunnelctl $VERSION (tag $TAG) built from ref $REF"
+
+      - name: Clone the code
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build static binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w" -o "dist/tunnelctl-linux-${arch}" ./cmd/tunnelctl
+          done
+          ( cd dist && sha256sum tunnelctl-linux-* > SHA256SUMS )
+          ls -l dist
+
+      - name: Attach binaries to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "$TAG" --notes "tunnelctl ${VERSION}"
+          fi
+          gh release upload "$TAG" \
+            dist/tunnelctl-linux-amd64 \
+            dist/tunnelctl-linux-arm64 \
+            dist/SHA256SUMS \
+            --clobber

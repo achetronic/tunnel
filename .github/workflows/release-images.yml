@@ -1,0 +1,110 @@
+name: Release images
+
+# Builds and pushes the controller and uplink images to GHCR using the
+# Makefile buildx targets (multi-arch build and push in one step).
+# Runs on a pushed "v*" tag, or manually with a semver and an optional
+# "build from the default branch" toggle.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to publish (e.g. 1.2.3 or v1.2.3).
+        required: true
+        type: string
+      from_master:
+        description: Build from the default branch HEAD instead of the version tag. The images are still published under the version tag.
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: release-images-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CONTROLLER_IMAGE: ghcr.io/achetronic/tunnel/controller
+  UPLINK_IMAGE: ghcr.io/achetronic/tunnel/uplink
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  images:
+    name: Build and push controller and uplink images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Resolve version and ref
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_FROM_MASTER: ${{ inputs.from_master }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            RAW="$IN_VERSION"
+          else
+            RAW="$REF_NAME"
+          fi
+          VERSION="${RAW#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$RAW' is not a valid semantic version"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_FROM_MASTER" = "true" ]; then
+            REF="$DEFAULT_BRANCH"
+          else
+            REF="$TAG"
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing $TAG, built from ref $REF"
+
+      - name: Clone the code
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.1.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the controller image
+        run: |
+          make docker-buildx \
+            IMG="${CONTROLLER_IMAGE}:${{ steps.meta.outputs.tag }}" \
+            VERSION="${{ steps.meta.outputs.version }}" \
+            PLATFORMS="${PLATFORMS}"
+
+      - name: Verify the controller image was pushed
+        run: docker buildx imagetools inspect "${CONTROLLER_IMAGE}:${{ steps.meta.outputs.tag }}"
+
+      - name: Build and push the uplink image
+        run: |
+          make docker-buildx-uplink \
+            UPLINK_IMG="${UPLINK_IMAGE}:${{ steps.meta.outputs.tag }}" \
+            VERSION="${{ steps.meta.outputs.version }}" \
+            PLATFORMS="${PLATFORMS}"
+
+      - name: Verify the uplink image was pushed
+        run: docker buildx imagetools inspect "${UPLINK_IMAGE}:${{ steps.meta.outputs.tag }}"

@@ -1,0 +1,325 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: portbindings.tunnel.achetronic.com
+spec:
+  group: tunnel.achetronic.com
+  names:
+    kind: PortBinding
+    listKind: PortBindingList
+    plural: portbindings
+    shortNames:
+    - pb
+    singular: portbinding
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.edgeNodeRef.name
+      name: Node
+      type: string
+    - jsonPath: .status.observedGeneration
+      name: ObservedGen
+      type: integer
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PortBinding is the Schema for the portbindings API. It declares which ports to
+          expose on an EdgeNode and where to route them in the cluster.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: spec defines the desired state of PortBinding
+            properties:
+              bindings:
+                description: Bindings is the list of ports to expose and their targets.
+                items:
+                  description: PortBindingDefinition defines one exposed port and
+                    its routing.
+                  properties:
+                    listenPort:
+                      description: |-
+                        ListenPort is the public port exposed on the VPS. Must be unique across
+                        all bindings of the same host.
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    name:
+                      description: Name is a unique identifier for this binding within
+                        the PortBinding CR.
+                      type: string
+                    protocol:
+                      description: Protocol is TCP or UDP.
+                      enum:
+                      - TCP
+                      - UDP
+                      type: string
+                    target:
+                      description: Target is where the traffic is forwarded after
+                        exiting the tunnel.
+                      properties:
+                        address:
+                          description: Address is a raw IP address (e.g. 10.244.3.17)
+                            to forward traffic to.
+                          type: string
+                        port:
+                          description: |-
+                            Port is required when Address is used. Must be a valid TCP/UDP port
+                            number (1-65535).
+                          format: int32
+                          maximum: 65535
+                          minimum: 1
+                          type: integer
+                        service:
+                          description: |-
+                            Service points to an in-cluster Service. The operator resolves it to its
+                            current ClusterIP.
+                          properties:
+                            name:
+                              description: Name is the name of the target Service.
+                              minLength: 1
+                              type: string
+                            namespace:
+                              description: Namespace is the namespace of the target
+                                Service.
+                              minLength: 1
+                              type: string
+                            port:
+                              description: |-
+                                Port is the port number on the target Service to forward traffic to.
+                                Must be a valid TCP/UDP port number (1-65535).
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
+                          required:
+                          - name
+                          - namespace
+                          - port
+                          type: object
+                      type: object
+                    tcp:
+                      description: TCP holds parameters specific to TCP bindings.
+                        Only valid if Protocol is TCP.
+                      properties:
+                        connectTimeout:
+                          default: 5s
+                          description: ConnectTimeout is the proxy connect timeout
+                            (e.g. "5s").
+                          type: string
+                        idleTimeout:
+                          default: 1h
+                          description: IdleTimeout is the proxy idle timeout for TCP
+                            sessions (e.g. "1h").
+                          type: string
+                        proxyProtocol:
+                          default: false
+                          description: ProxyProtocol enables proxy_protocol v1 towards
+                            the target.
+                          type: boolean
+                      type: object
+                    tls:
+                      description: |-
+                        TLS holds optional TLS configuration for this binding. Only valid when
+                        Protocol is TCP. The CEL rules on PortBinding reject TLS on UDP bindings
+                        and require secretRef when mode is offload or mutual.
+                      properties:
+                        mode:
+                          description: |-
+                            Mode selects how TLS is handled for this binding.
+                            passthrough routes by SNI without decrypting; offload terminates TLS on
+                            the VPS using tls.crt and tls.key from the Secret; mutual adds
+                            client-certificate verification using ca.crt from the Secret.
+                          enum:
+                          - passthrough
+                          - offload
+                          - mutual
+                          type: string
+                        secretRef:
+                          description: |-
+                            SecretRef points to a kubernetes.io/tls Secret from which the operator
+                            reads credentials according to the selected mode:
+                              - offload: reads tls.crt and tls.key
+                              - mutual:  reads tls.crt, tls.key, and ca.crt
+                              - passthrough: field is ignored; the private key stays in the cluster
+                            The CEL rule on PortBinding enforces that secretRef is present when mode
+                            is offload or mutual.
+                          properties:
+                            name:
+                              description: Name is the Secret name.
+                              minLength: 1
+                              type: string
+                            namespace:
+                              description: Namespace is the Secret namespace. Defaults
+                                to the owner's namespace when empty.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                      required:
+                      - mode
+                      type: object
+                    udp:
+                      description: UDP holds parameters specific to UDP bindings.
+                        Only valid if Protocol is UDP.
+                      properties:
+                        sessionTimeout:
+                          default: 60s
+                          description: |-
+                            SessionTimeout is the proxy idle timeout for UDP sessions. Must be
+                            greater than the keepalive of the transported protocol (e.g. "60s").
+                          type: string
+                      type: object
+                  required:
+                  - listenPort
+                  - name
+                  - protocol
+                  - target
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              edgeNodeRef:
+                description: EdgeNodeRef points to the EdgeNode where these ports
+                  will be exposed.
+                properties:
+                  name:
+                    description: Name is the name of the referenced EdgeNode. Must
+                      be a non-empty string.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is the namespace of the referenced EdgeNode. Defaults to the
+                      PortBinding namespace when omitted.
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - bindings
+            - edgeNodeRef
+            type: object
+          status:
+            description: status defines the observed state of PortBinding
+            properties:
+              conditions:
+                description: |-
+                  Conditions represent the current state of the PortBinding. The Ready
+                  condition is set to True once the corresponding EdgeNode has accepted
+                  and applied all bindings declared in this CR.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation of the PortBinding spec
+                  that was last processed by the reconciler. Consumers (GitOps tooling,
+                  dependent controllers) use this field to detect whether the current
+                  status reflects the latest desired state or still corresponds to a
+                  previous generation. The reconciler must set this to
+                  portBinding.Generation before calling Status().Update().
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: Protocol TCP cannot have UDP params and vice-versa
+          rule: 'self.spec.bindings.all(b, (b.protocol == ''TCP'' ? !has(b.udp) :
+            !has(b.tcp)))'
+        - message: Target must have either Service or Address, not both
+          rule: 'self.spec.bindings.all(b, (has(b.target.service) ? !has(b.target.address)
+            : has(b.target.address)))'
+        - message: TLS configuration is only valid for TCP protocol
+          rule: self.spec.bindings.all(b, !has(b.tls) || b.protocol == 'TCP')
+        - message: tls.secretRef is required when mode is offload or mutual
+          rule: self.spec.bindings.all(b, !has(b.tls) || b.tls.mode == 'passthrough'
+            || has(b.tls.secretRef))
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,120 @@
+name: Release Helm chart
+
+# Packages the Helm chart as an OCI artifact and pushes it to GHCR.
+# The chart ships the CRDs regenerated from the source of this release.
+# Runs on a pushed "v*" tag, or manually with a semver and an optional
+# "build from the default branch" toggle.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic version to publish (e.g. 1.2.3 or v1.2.3).
+        required: true
+        type: string
+      from_master:
+        description: Build from the default branch HEAD instead of the version tag. The chart is still published under the version tag.
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: release-helm-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CHART_DIR: deploy/helm/tunnel
+  OCI_REPO: oci://ghcr.io/achetronic/tunnel/charts
+
+jobs:
+  chart:
+    name: Package and push the Helm chart
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Resolve version and ref
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_FROM_MASTER: ${{ inputs.from_master }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            RAW="$IN_VERSION"
+          else
+            RAW="$REF_NAME"
+          fi
+          VERSION="${RAW#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$RAW' is not a valid semantic version"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$IN_FROM_MASTER" = "true" ]; then
+            REF="$DEFAULT_BRANCH"
+          else
+            REF="$TAG"
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "ref=$REF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing chart $VERSION, built from ref $REF"
+
+      - name: Clone the code
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ steps.meta.outputs.ref }}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Regenerate CRDs from the source of this release
+        run: |
+          set -euo pipefail
+          make manifests
+          rm -f "${CHART_DIR}/crds/"*.yaml
+          cp config/crd/bases/*.yaml "${CHART_DIR}/crds/"
+          git --no-pager diff --stat -- "${CHART_DIR}/crds/" || true
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.3.1
+
+      - name: Lint the chart
+        run: helm lint "${CHART_DIR}"
+
+      - name: Package the chart
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          helm package "${CHART_DIR}" \
+            --version "$VERSION" \
+            --app-version "$VERSION" \
+            --destination dist
+
+      - name: Log in to the OCI registry
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: Push the chart
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: helm push "dist/tunnel-${VERSION}.tgz" "${OCI_REPO}"

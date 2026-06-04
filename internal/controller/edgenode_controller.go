@@ -1,0 +1,178 @@
+/*
+Copyright 2026 achetronic.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package controller contains the controllers for the Tunnel operator.
+package controller
+
+import (
+	"context"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/achetronic/tunnel/api/v1alpha1"
+	"github.com/achetronic/tunnel/internal/provision"
+	"github.com/achetronic/tunnel/internal/sshexec"
+)
+
+// EdgeNodeReconciler reconciles an EdgeNode object.
+type EdgeNodeReconciler struct {
+	client.Client
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
+	// ExecutorFactory builds the SSH executor for a node. When nil the
+	// reconciler dials the real host via sshexec.NewSSHExecutor. Tests inject a
+	// factory returning a FakeExecutor so production code never references the
+	// fake.
+	ExecutorFactory func(ctx context.Context, node *v1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error)
+	// RequeueInterval is how often a healthy EdgeNode is re-reconciled for drift
+	// detection and status refresh. Zero falls back to defaultRequeueInterval.
+	RequeueInterval time.Duration
+	// EnvoyVersion is the Envoy release installed on every VPS, set from the
+	// manager's --envoy-version flag. Empty falls back to DefaultEnvoyVersion.
+	EnvoyVersion string
+	// TunnelctlDir is the local directory holding the static tunnelctl binaries
+	// (tunnelctl-linux-<arch>) the operator pushes to every VPS over SSH, set from
+	// the manager's --tunnelctl-dir flag. Empty falls back to DefaultTunnelctlDir.
+	TunnelctlDir string
+	// UplinkImage is the container image for the in-cluster uplink StatefulSet,
+	// composed by the manager from --image-repo/--image-tag. Empty falls back to
+	// DefaultUplinkImage.
+	UplinkImage string
+}
+
+// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes/finalizers,verbs=update
+// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
+
+// Reconcile is the main reconcile loop for the EdgeNode resource. It handles
+// fetching, finalizer setup/teardown and status updates, delegating the actual
+// SSH provisioning, IPAM and resource configuration to handleReconciliation.
+func (r *EdgeNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	var node v1alpha1.EdgeNode
+	if err := r.Get(ctx, req.NamespacedName, &node); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	skipDeprovision := node.Annotations[skipDeprovisionAnnotation] == annotationTrue
+
+	if !node.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(&node, edgeNodeFinalizer) {
+			if !skipDeprovision {
+				exec, err := r.getSSHExecutor(ctx, &node)
+				if err != nil {
+					logger.Error(err, "failed to connect for teardown, retry or set skip-deprovision")
+					if r.Recorder != nil {
+						r.Recorder.Event(&node, corev1.EventTypeWarning, "SSHConnectionFailed", "Failed to connect via SSH for teardown")
+					}
+					return ctrl.Result{RequeueAfter: 1 * time.Minute}, err
+				}
+
+				teardownCtx, cancel := context.WithTimeout(ctx, teardownTimeout)
+				err = provision.Teardown(teardownCtx, exec)
+				cancel()
+				closeExecutor(exec, logger)
+				if err != nil {
+					logger.Error(err, "failed to tear down the VPS, retry or set skip-deprovision")
+					if r.Recorder != nil {
+						r.Recorder.Event(&node, corev1.EventTypeWarning, "ProvisioningFailed", "Failed to tear down the VPS")
+					}
+					return ctrl.Result{RequeueAfter: 1 * time.Minute}, err
+				}
+				if r.Recorder != nil {
+					r.Recorder.Event(&node, corev1.EventTypeNormal, "TornDown", "VPS torn down successfully")
+				}
+			}
+
+			// Clean up the in-cluster uplink resources. They live in
+			// spec.uplink.namespace, which can differ from the EdgeNode
+			// namespace, so cross-namespace owner-reference GC does not apply
+			// and we must delete them explicitly.
+			if err := r.deleteUplinkResources(ctx, &node); err != nil {
+				logger.Error(err, "failed to delete uplink resources")
+				return ctrl.Result{RequeueAfter: 1 * time.Minute}, err
+			}
+
+			controllerutil.RemoveFinalizer(&node, edgeNodeFinalizer)
+			if err := r.Update(ctx, &node); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Consume the one-shot restart-envoy annotation together with the finalizer
+	// in a single metadata update, before any status mutation, so removing it
+	// cannot clobber the status written later. restartRequested is captured here
+	// and honoured during handleReconciliation.
+	restartRequested := node.Annotations[restartEnvoyAnnotation] == annotationTrue
+	needsMetaUpdate := false
+	if !controllerutil.ContainsFinalizer(&node, edgeNodeFinalizer) {
+		controllerutil.AddFinalizer(&node, edgeNodeFinalizer)
+		needsMetaUpdate = true
+	}
+	if restartRequested {
+		delete(node.Annotations, restartEnvoyAnnotation)
+		needsMetaUpdate = true
+	}
+	if needsMetaUpdate {
+		if err := r.Update(ctx, &node); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	isReady, reason, msg, err := r.handleReconciliation(ctx, &node, restartRequested)
+	return r.updateStatusAndReturn(ctx, &node, isReady, reason, msg, err)
+}
+
+// SetupWithManager registers the EdgeNodeReconciler with the controller
+// manager. It wires a default event recorder when none was injected; the
+// ExecutorFactory is left nil so production reconciles dial the real host.
+// A secondary Watch on corev1.Secret drives automatic TLS certificate rotation:
+// when a Secret referenced by any PortBinding TLS SecretRef changes (e.g.
+// cert-manager renews it), mapSecretToEdgeNodes returns the affected EdgeNodes
+// so they are re-enqueued and the new cert is pushed to the VPS.
+func (r *EdgeNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if r.Recorder == nil {
+		// GetEventRecorderFor returns the record.EventRecorder this controller
+		// uses. staticcheck flags it as deprecated in favour of the new events
+		// API, but that API exposes a different interface that would cascade
+		// into every Event call; the classic recorder remains supported.
+		r.Recorder = mgr.GetEventRecorderFor("edgenode-controller") //nolint:staticcheck
+	}
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&v1alpha1.EdgeNode{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.mapSecretToEdgeNodes),
+		).
+		Complete(r)
+}

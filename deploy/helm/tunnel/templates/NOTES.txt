@@ -1,0 +1,49 @@
+Tunnel Operator {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+Release name : {{ .Release.Name }}
+Deployment   : {{ include "tunnel.fullname" . }}
+
+Check the controller is running:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "tunnel.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "tunnel.name" . }} --tail=50
+
+CRDs installed by this chart:
+  EdgeNode    (tunnel.achetronic.com/v1alpha1)
+  PortBinding (tunnel.achetronic.com/v1alpha1)
+
+IMPORTANT - Helm CRD caveat:
+  Helm installs CRDs from crds/ on the FIRST install only.
+  Helm does NOT upgrade or delete CRDs on subsequent helm upgrade or helm uninstall
+  runs. To update CRDs after a chart upgrade, apply them manually:
+
+    kubectl apply --server-side -f \
+      https://raw.githubusercontent.com/achetronic/tunnel/main/config/crd/bases/tunnel.achetronic.com_edgenodes.yaml
+    kubectl apply --server-side -f \
+      https://raw.githubusercontent.com/achetronic/tunnel/main/config/crd/bases/tunnel.achetronic.com_portbindings.yaml
+
+  Or from a local clone of the repository:
+
+    kubectl apply --server-side -f config/crd/bases/
+
+Getting started:
+  Sample manifests are available at:
+    https://github.com/achetronic/tunnel/tree/main/config/samples
+
+  Quick-start (review the samples before applying to production):
+    kubectl apply -f config/samples/tunnel_v1alpha1_edgenode.yaml
+    kubectl apply -f config/samples/tunnel_v1alpha1_portbinding.yaml
+
+  Then observe reconciliation:
+    kubectl get edgenodes,portbindings -A
+    kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "tunnel.name" . }} -f
+{{- if ne (.Values.flags.metricsBindAddress | toString) "0" }}
+
+Metrics (HTTPS on port {{ .Values.flags.metricsBindAddress | toString | splitList ":" | last }}):
+  Service: {{ include "tunnel.fullname" . }}-metrics
+  {{- if .Values.metrics.tls.secretName }}
+  TLS secret: {{ .Values.metrics.tls.secretName }} (mounted at /tmp/k8s-metrics-server/metrics-certs)
+  {{- else }}
+  TLS: controller-runtime self-signed certificate (set metrics.tls.secretName to use your own).
+  {{- end }}
+{{- end }}

@@ -1,0 +1,42 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+# ServiceMonitor for Prometheus Operator.
+# Mirrors config/prometheus/monitor.yaml.
+# Requires the monitoring.coreos.com/v1 CRD to be present in the cluster.
+# Ref: https://github.com/achetronic/tunnel/blob/main/config/prometheus/monitor.yaml
+# Ref: https://prometheus-operator.dev/docs/api-reference/api/#monitoring.coreos.com/v1.ServiceMonitor
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "tunnel.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tunnel.labels" . | nindent 4 }}
+spec:
+  endpoints:
+    - path: /metrics
+      # "https" must match the port name on the metrics Service.
+      port: https
+      scheme: https
+      # Bearer token from the manager's own ServiceAccount used for authn/authz.
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      {{- if .Values.metrics.serviceMonitor.interval }}
+      interval: {{ .Values.metrics.serviceMonitor.interval }}
+      {{- end }}
+      {{- if .Values.metrics.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.tlsConfig }}
+      # NOTE: insecureSkipVerify: true is the default (self-signed cert path).
+      # For production, configure cert-manager and set insecureSkipVerify: false.
+      # Ref: https://github.com/achetronic/tunnel/blob/main/config/prometheus/monitor_tls_patch.yaml
+      tlsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.metrics.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  selector:
+    matchLabels:
+      {{- include "tunnel.selectorLabels" . | nindent 6 }}
+{{- end }}

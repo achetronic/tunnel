@@ -1,0 +1,32 @@
+apiVersion: v2
+
+name: tunnel
+type: application
+
+# Chart version (SemVer). CI may override it at package time.
+version: 0.1.0
+
+# Operator version. When image.tag is empty the controller image uses this tag,
+# so CI should stamp it (or set image.tag) before a real release.
+appVersion: "0.0.0"
+
+# Needs 1.25+ for CEL validation rules and coordination.k8s.io/v1 leases.
+kubeVersion: ">= 1.25.0-0"
+
+description: Tunnel is an operator for exposing services from a private Kubernetes cluster to the internet in a simple, fast, secure and reliable way, even with no public ingress of its own.
+
+home: https://github.com/achetronic/tunnel
+
+sources:
+  - https://github.com/achetronic/tunnel
+
+maintainers:
+  - name: achetronic
+    url: https://github.com/achetronic
+
+keywords:
+  - tunnel
+  - wireguard
+  - envoy
+  - operator
+  - networking

@@ -1,0 +1,221 @@
+# Default values for tunnel.
+# Lines starting with "# --" are rendered by helm-docs.
+
+# -- Number of controller-manager Deployment replicas.
+# Ref: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/#replicas
+replicaCount: 1
+
+image:
+  # -- Container image repository for the controller manager.
+  # Ref: https://github.com/achetronic/tunnel/pkgs/container/tunnel%2Fcontroller
+  repository: ghcr.io/achetronic/tunnel/controller
+  # -- Image tag. When empty the chart appVersion is used.
+  # Ref: https://helm.sh/docs/topics/charts/#the-appversion-field
+  tag: ""
+  # -- Image pull policy.
+  # Ref: https://kubernetes.io/docs/concepts/containers/images/#image-pull-policy
+  pullPolicy: IfNotPresent
+
+# -- List of image pull secret names for the controller manager Pod.
+# Ref: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
+imagePullSecrets: []
+# - name: regcred
+
+# -- Override the chart name used as the resource name prefix.
+nameOverride: ""
+# -- Override the fully-qualified release name.
+fullnameOverride: ""
+
+# Manager CLI flags. Each camelCase key becomes --kebab-case=<value>
+# (leaderElect -> --leader-elect), so any flag the binary supports can be added
+# here as a key. Empty strings are dropped (binary default); booleans always render.
+# Ref: https://github.com/achetronic/tunnel/blob/main/cmd/main.go
+flags:
+  # -- Leader election so a single replica reconciles at a time (--leader-elect).
+  # Ref: https://kubernetes.io/docs/concepts/cluster-administration/controller-manager/#leader-election
+  leaderElect: false
+  # -- Address the health/readiness probe server binds to (--health-probe-bind-address).
+  # The Deployment probes derive their port from this value.
+  healthProbeBindAddress: ":8081"
+  # -- Metrics server bind address (--metrics-bind-address). "0" turns metrics off
+  # and drops the metrics Service. The Service and container port follow this value.
+  # Ref: https://book.kubebuilder.io/reference/metrics.html
+  metricsBindAddress: ":8443"
+  # -- Serve metrics over HTTPS (--metrics-secure). With HTTPS and no TLS secret,
+  # controller-runtime generates a self-signed cert, so cert-manager is not required.
+  # Ref: https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/metrics/server
+  metricsSecure: true
+  # -- Enable HTTP/2 on the metrics server (--enable-http2). Off by default to dodge
+  # the HTTP/2 stream-cancellation CVEs.
+  # Ref: https://github.com/advisories/GHSA-qppj-fm5r-hxr3
+  enableHTTP2: false
+  # -- Envoy release installed on managed VPS nodes (--envoy-version). Must be an
+  # official Envoy GitHub release tag.
+  # Ref: https://github.com/achetronic/tunnel/blob/main/internal/controller/edgenode_sync.go
+  envoyVersion: "1.29.3"
+  # -- Base repository for the operator-managed uplink image (--image-repo). The
+  # operator builds <imageRepo>/uplink:<imageTag> at runtime; this chart creates
+  # no uplink Deployment.
+  imageRepo: "ghcr.io/achetronic/tunnel"
+  # -- Tag for the uplink image (--image-tag). Empty falls back to image.tag (the
+  # controller tag, which itself defaults to the chart appVersion), so the uplink
+  # stays in lockstep with the controller. Set it to pin a different uplink tag.
+  imageTag: ""
+
+# Manager environment variables. Each camelCase key becomes UPPER_SNAKE_CASE
+# (logFormat -> LOG_FORMAT). Use extraEnv below for structured entries like valueFrom.
+# Ref: https://github.com/achetronic/tunnel/blob/main/internal/logging/logging.go
+env:
+  # -- Log output format: json or text.
+  logFormat: "json"
+  # -- Minimum log level: debug, info, warn, or error.
+  logLevel: "info"
+
+# -- Extra raw CLI arguments appended after the generated flags, for the rare flag
+# that does not fit the flags map (repeated or positional).
+extraArgs: []
+# - --zap-log-level=5
+
+# -- Extra environment variables appended after the env map. Use this for structured
+# entries such as valueFrom (secret or field references).
+# Ref: https://kubernetes.io/docs/tasks/inject-data-application/define-environment-variable-container/
+extraEnv: []
+# - name: MY_VAR
+#   valueFrom:
+#     secretKeyRef:
+#       name: my-secret
+#       key: my-key
+
+# Auxiliary resources around the metrics endpoint. Whether metrics run and on
+# which port comes from flags.metricsBindAddress; secure and http2 live in flags.
+metrics:
+
+  service:
+    # -- Annotations added to the metrics Service object.
+    annotations: {}
+
+  tls:
+    # -- Name of a Kubernetes Secret containing TLS credentials for the metrics server.
+    # When set, the secret is mounted at /tmp/k8s-metrics-server/metrics-certs and
+    # --metrics-cert-path is passed to the manager. Keys: ca.crt, tls.crt, tls.key.
+    # Ref: https://github.com/achetronic/tunnel/blob/main/config/default/cert_metrics_manager_patch.yaml
+    secretName: ""
+
+  serviceMonitor:
+    # -- Create a Prometheus Operator ServiceMonitor for the metrics endpoint.
+    # Requires the monitoring.coreos.com/v1 CRD to be present.
+    # Ref: https://prometheus-operator.dev/docs/api-reference/api/#monitoring.coreos.com/v1.ServiceMonitor
+    enabled: false
+
+    # -- Scrape interval for the ServiceMonitor endpoint.
+    interval: "30s"
+
+    # -- Scrape timeout for the ServiceMonitor endpoint.
+    scrapeTimeout: "10s"
+
+    # -- TLS configuration block for the ServiceMonitor endpoint.
+    # insecureSkipVerify: true is the default (mirrors config/prometheus/monitor.yaml).
+    # For production, configure cert-manager, set insecureSkipVerify: false, and
+    # reference the cert secret as shown in config/prometheus/monitor_tls_patch.yaml.
+    # Ref: https://github.com/achetronic/tunnel/blob/main/config/prometheus/monitor_tls_patch.yaml
+    tlsConfig:
+      insecureSkipVerify: true
+
+    # -- Additional relabeling rules applied to scraped samples.
+    # Ref: https://prometheus-operator.dev/docs/api-reference/api/#monitoring.coreos.com/v1.RelabelConfig
+    relabelings: []
+
+  networkPolicy:
+    # -- Create a NetworkPolicy that restricts ingress to the metrics port.
+    # Ref: https://github.com/achetronic/tunnel/blob/main/config/network-policy/allow-metrics-traffic.yaml
+    enabled: false
+
+    # -- matchLabels that a namespace must carry for its pods to reach the metrics port.
+    # Ref: https://kubernetes.io/docs/concepts/services-networking/network-policies/#targeting-a-namespace-by-its-name
+    namespaceSelector:
+      metrics: enabled
+
+serviceAccount:
+  # -- Create a ServiceAccount for the controller manager.
+  create: true
+
+  # -- Name of the ServiceAccount. Defaults to the chart fullname when empty.
+  # Ref: https://kubernetes.io/docs/tasks/configure-pod-container/configure-service-account/
+  name: ""
+
+  # -- Annotations added to the ServiceAccount (e.g. for IRSA or Workload Identity).
+  annotations: {}
+
+rbac:
+  # -- Create RBAC resources: ClusterRoles, namespaced Role, and their bindings.
+  # Set to false when an external tool (e.g. ArgoCD) manages RBAC separately.
+  # Ref: https://kubernetes.io/docs/reference/access-authn-authz/rbac/
+  create: true
+
+# -- Annotations added to every manager Pod.
+# Ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/
+podAnnotations: {}
+
+# -- Extra labels added to every manager Pod (merged with the chart selector labels).
+# Ref: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
+podLabels: {}
+
+# -- Pod-level security context applied to the manager Pod.
+# Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-pod
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context applied to the manager container.
+# Ref: https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#set-the-security-context-for-a-container
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Resource requests and limits for the manager container.
+# Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Node selector for the manager Pod.
+# Ref: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector
+nodeSelector: {}
+
+# -- Tolerations for the manager Pod.
+# Ref: https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
+tolerations: []
+
+# -- Affinity rules for the manager Pod.
+# Ref: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity
+affinity: {}
+
+# -- Topology spread constraints for the manager Pod.
+# Ref: https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/
+topologySpreadConstraints: []
+
+# -- Priority class name assigned to the manager Pod.
+# Ref: https://kubernetes.io/docs/concepts/scheduling-eviction/pod-priority-preemption/
+priorityClassName: ""
+
+# -- Additional volumes to attach to the manager Pod.
+# Ref: https://kubernetes.io/docs/concepts/storage/volumes/
+extraVolumes: []
+# - name: custom-config
+#   configMap:
+#     name: my-config
+
+# -- Additional volume mounts for the manager container.
+# Ref: https://kubernetes.io/docs/concepts/storage/volumes/
+extraVolumeMounts: []
+# - name: custom-config
+#   mountPath: /etc/custom
+#   readOnly: true
