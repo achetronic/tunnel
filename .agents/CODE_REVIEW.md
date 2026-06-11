@@ -101,19 +101,33 @@ They violate DESIGN_AND_RULES §5 ("English Only"). Rewritten to equivalent
 English comments. No logic change. (Done because it is an explicit project rule
 and trivial; purely cosmetic English/Spanish drift elsewhere was left alone.)
 
+### F4 — Prune orphaned TLS material from the edge (ROBUSTNESS/hygiene, was N1)
+**File:** `internal/provision/enroll.go` (`applyTLSFiles`, new `pruneTLSFiles`).
+
+**What.** `applyTLSFiles` wrote/refreshed the per-binding SDS documents but never
+removed files for bindings that had been deleted; only full `Teardown` wiped
+`/etc/envoy`. A removed TLS binding therefore left its private key (inline in the
+orphaned `*.sds.yaml`) on the edge until the node was torn down.
+
+**Fix.** After writing the desired set, `applyTLSFiles` now prunes
+`/etc/envoy/tls`: it lists the directory and removes any TLS-material file not in
+the desired set. It also cleans up pre-SDS `*.crt`/`*.key` files left by the old
+layout, so an in-place upgrade does not strand key material. Deletions are
+restricted to names matching a conservative allowlist regex
+(`^[A-Za-z0-9._-]+\.(sds\.yaml|crt|key)$`), so an unexpected file is never
+removed and no shell metacharacter from a name can reach the remote command. The
+prune is gated by the same TLS hash that gates the writes, so it adds no work to
+steady-state reconciles (the Enroll short-circuit returns earlier when nothing
+changed). Regression tests: `TestApplyTLSFiles_PrunesOrphans`,
+`TestApplyTLSFiles_PrunesAllWhenEmpty`.
+
 ---
 
 ## Notes (intentionally not changed)
 
-### N1 — Orphaned TLS material after a binding is removed (ROBUSTNESS/hygiene)
-`applyTLSFiles` writes/refreshes the per-binding `*.sds.yaml` documents under
-`/etc/envoy/tls/` but never prunes files for bindings that were deleted; only
-full `Teardown` wipes `/etc/envoy`. After removing a TLS binding the LDS no
-longer references the old SDS document (so Envoy won't load it), but the file —
-which carries the private key inline — lingers on the edge until the node is
-torn down. Given the design treats key-on-edge as sensitive, pruning the `tls/`
-dir to exactly the current materials would be tidier. Low severity (no
-functional impact, the secret is unreferenced); left as a deliberate follow-up.
+### N1 — Orphaned TLS material after a binding is removed — RESOLVED
+Resolved in F4 (`applyTLSFiles` now prunes stale SDS documents and pre-SDS
+cert/key files from `/etc/envoy/tls`). Kept here as a pointer; see F4.
 
 ### N2 — `agentrun.Run` does not observe its `ctx` for shutdown (NOTE)
 `Run(ctx, ...)` starts `watchConfig` and `srv.ListenAndServe()` but never uses

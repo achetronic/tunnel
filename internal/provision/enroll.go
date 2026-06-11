@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -423,39 +424,55 @@ func writeState(ctx context.Context, exec sshexec.Executor, st *State) error {
 	return exec.Put(ctx, "/etc/tunnel-operator/state.json", b)
 }
 
-// applyTLSFiles writes cert and key material to /etc/envoy/tls on the VPS when
-// the hash of the material has changed. Each file is written atomically via
-// exec.Put (which uses a temp file + rename under the hood). The /etc/envoy/tls
-// directory is created with mkdir -p before any Put so the first enrollment
-// does not fail on a missing directory. On success the state TLSHash is updated
-// and persisted so subsequent reconciles are no-ops.
+// tlsDirPath is the directory on the VPS holding the per-binding SDS documents.
+// It is also the watched_directory Envoy monitors for atomic moves to reload a
+// rotated certificate gracefully. The operator owns it exclusively.
+const tlsDirPath = "/etc/envoy/tls"
+
+// safeTLSArtifact matches the file names the operator is willing to delete when
+// pruning stale TLS material: the SDS documents it writes today plus the
+// cert/key files left by the pre-SDS layout. It is deliberately conservative so
+// an unexpected file in the directory is never removed, and rules out shell
+// metacharacters in a name that would otherwise reach a remote command.
+var safeTLSArtifact = regexp.MustCompile(`^[A-Za-z0-9._-]+\.(sds\.yaml|crt|key)$`)
+
+// applyTLSFiles syncs the per-binding SDS documents under /etc/envoy/tls on the
+// VPS when the hash of the material has changed. Each file is written atomically
+// (temp + chmod 600 + rename) so Envoy never reads a partial file, the private
+// key is never world readable, and the move triggers Envoy's graceful SDS
+// reload. After writing the desired set it prunes any stale TLS material left
+// behind by removed bindings (or by the pre-SDS cert/key layout) so private keys
+// never linger on the edge. On success the state TLSHash is updated and
+// persisted so subsequent reconciles are no-ops.
 func applyTLSFiles(ctx context.Context, exec sshexec.Executor, files []TLSFile, newHash string, state *State) (bool, error) {
 	if state.TLSHash == newHash {
 		return false, nil
 	}
-	if len(files) == 0 && newHash == hashTLSFiles(nil) {
-		// Nothing to push and the state already reflects no TLS material;
-		// clear the hash so it stays consistent.
-		state.TLSHash = newHash
-		return false, writeState(ctx, exec, state)
+
+	if len(files) > 0 {
+		if _, err := exec.Run(ctx, "mkdir -p "+tlsDirPath); err != nil {
+			return false, fmt.Errorf("failed to create %s: %w", tlsDirPath, err)
+		}
+		for _, f := range files {
+			// Write to a temp path first, then chmod 600 and rename atomically so
+			// Envoy never reads a partial file and the private key is never world
+			// readable, not even briefly.
+			tmp := f.Path + ".tmp"
+			if err := exec.Put(ctx, tmp, f.Content); err != nil {
+				return false, fmt.Errorf("failed to put TLS file %s: %w", f.Path, err)
+			}
+			cmd := fmt.Sprintf("chmod 600 %s && mv %s %s", tmp, tmp, f.Path)
+			if _, err := exec.Run(ctx, cmd); err != nil {
+				return false, fmt.Errorf("failed to install TLS file %s: %w", f.Path, err)
+			}
+		}
 	}
 
-	if _, err := exec.Run(ctx, "mkdir -p /etc/envoy/tls"); err != nil {
-		return false, fmt.Errorf("failed to create /etc/envoy/tls: %w", err)
-	}
-
-	for _, f := range files {
-		// Write to a temp path first, then chmod 600 and rename atomically so
-		// Envoy never reads a partial file and the private key is never world
-		// readable, not even briefly.
-		tmp := f.Path + ".tmp"
-		if err := exec.Put(ctx, tmp, f.Content); err != nil {
-			return false, fmt.Errorf("failed to put TLS file %s: %w", f.Path, err)
-		}
-		cmd := fmt.Sprintf("chmod 600 %s && mv %s %s", tmp, tmp, f.Path)
-		if _, err := exec.Run(ctx, cmd); err != nil {
-			return false, fmt.Errorf("failed to install TLS file %s: %w", f.Path, err)
-		}
+	// Remove TLS material for bindings that no longer exist (and any pre-SDS
+	// cert/key files) so a deleted binding does not leave its private key on the
+	// edge until full teardown.
+	if err := pruneTLSFiles(ctx, exec, files); err != nil {
+		return false, err
 	}
 
 	state.TLSHash = newHash
@@ -463,6 +480,42 @@ func applyTLSFiles(ctx context.Context, exec sshexec.Executor, files []TLSFile, 
 		return false, fmt.Errorf("failed to persist TLS state: %w", err)
 	}
 	return len(files) > 0, nil
+}
+
+// pruneTLSFiles removes every TLS-material file in tlsDirPath that is not part of
+// the desired set. It only ever deletes names matching safeTLSArtifact, so an
+// unrelated file dropped in the directory is left untouched. A missing directory
+// is fine (nothing to prune): ls exits non-zero, which is an *ssh.ExitError and
+// not a transport failure.
+func pruneTLSFiles(ctx context.Context, exec sshexec.Executor, desired []TLSFile) error {
+	keep := make(map[string]struct{}, len(desired))
+	for _, f := range desired {
+		keep[filepath.Base(f.Path)] = struct{}{}
+	}
+
+	out, err := exec.Run(ctx, "ls -1 "+tlsDirPath+" 2>/dev/null")
+	if err != nil {
+		if isExitError(err) {
+			// Directory absent (or empty with a shell that errors): nothing to prune.
+			return nil
+		}
+		return fmt.Errorf("failed to list %s for pruning: %w", tlsDirPath, err)
+	}
+
+	for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || !safeTLSArtifact.MatchString(name) {
+			continue
+		}
+		if _, ok := keep[name]; ok {
+			continue
+		}
+		slog.Info("enroll: pruning stale TLS material", "file", name)
+		if _, err := exec.Run(ctx, "rm -f "+tlsDirPath+"/"+name); err != nil {
+			return fmt.Errorf("failed to remove stale TLS file %q: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // hashTLSFiles returns a deterministic hex-encoded SHA-256 hash of all TLS
