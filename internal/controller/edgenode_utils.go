@@ -37,6 +37,7 @@ import (
 	"github.com/achetronic/tunnel/internal/ipam"
 	"github.com/achetronic/tunnel/internal/planner"
 	"github.com/achetronic/tunnel/internal/provision"
+	"github.com/achetronic/tunnel/internal/render"
 	"github.com/achetronic/tunnel/internal/sshexec"
 	"github.com/achetronic/tunnel/internal/uplink"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -188,18 +189,31 @@ func (r *EdgeNodeReconciler) resolveUplinkPublicKeys(keysSecret *corev1.Secret, 
 	return uplinkKeys, nil
 }
 
-// collectBindings lists all PortBindings and returns those that target the named
-// EdgeNode via their spec.edgeNodeRef.
-func (r *EdgeNodeReconciler) collectBindings(ctx context.Context, nodeName string) ([]v1alpha1.PortBinding, error) {
+// collectBindings lists all PortBindings and returns those that target the given
+// EdgeNode via their spec.edgeNodeRef. The match is namespace-aware: a binding
+// belongs to this node only when both the referenced name AND the resolved
+// reference namespace equal the node's. EdgeNodeRef.Namespace defaults to the
+// PortBinding's own namespace when empty, mirroring triggerEdgeNode and
+// mapSecretToEdgeNodes, so two EdgeNodes that merely share a name in different
+// namespaces never aggregate each other's bindings.
+func (r *EdgeNodeReconciler) collectBindings(ctx context.Context, node *v1alpha1.EdgeNode) ([]v1alpha1.PortBinding, error) {
 	var pbList v1alpha1.PortBindingList
 	if err := r.List(ctx, &pbList); err != nil {
 		return nil, err
 	}
 	var bindings []v1alpha1.PortBinding
 	for _, pb := range pbList.Items {
-		if pb.Spec.EdgeNodeRef.Name == nodeName {
-			bindings = append(bindings, pb)
+		if pb.Spec.EdgeNodeRef.Name != node.Name {
+			continue
 		}
+		refNS := pb.Spec.EdgeNodeRef.Namespace
+		if refNS == "" {
+			refNS = pb.Namespace
+		}
+		if refNS != node.Namespace {
+			continue
+		}
+		bindings = append(bindings, pb)
 	}
 	return bindings, nil
 }
@@ -386,10 +400,12 @@ func (r *EdgeNodeReconciler) collectTLSFiles(
 				fmt.Errorf("%s", message)
 		}
 
-		files = append(files,
-			provision.TLSFile{Path: mat.CertPath, Content: cert},
-			provision.TLSFile{Path: mat.KeyPath, Content: key},
-		)
+		sdsCfg := render.EnvoySDSConfig{
+			Mode:           mat.Mode,
+			CertSecretName: mat.CertSecretName,
+			CertPEM:        cert,
+			KeyPEM:         key,
+		}
 
 		if mat.Mode == "mutual" {
 			ca, hasCA := secret.Data["ca.crt"]
@@ -401,8 +417,22 @@ func (r *EdgeNodeReconciler) collectTLSFiles(
 				return nil, metav1.ConditionFalse, tlsSecretIncompleteReason, message,
 					fmt.Errorf("%s", message)
 			}
-			files = append(files, provision.TLSFile{Path: mat.CAPath, Content: ca})
+			sdsCfg.CASecretName = mat.CASecretName
+			sdsCfg.CAPEM = ca
 		}
+
+		// Render the per-binding SDS document with the cert/key (and CA for
+		// mutual) embedded inline, so the whole secret is swapped atomically as a
+		// single file and Envoy hot-reloads it without a restart.
+		sdsDoc, sdsErr := render.RenderEnvoySDS(sdsCfg)
+		if sdsErr != nil {
+			message := fmt.Sprintf(
+				"failed to render SDS document for binding %q from Secret %s/%s: %v",
+				mat.BindingName, ns, mat.SecretName, sdsErr,
+			)
+			return nil, metav1.ConditionFalse, tlsSecretIncompleteReason, message, sdsErr
+		}
+		files = append(files, provision.TLSFile{Path: mat.SDSPath, Content: sdsDoc})
 	}
 	return files, metav1.ConditionTrue, "", "", nil
 }

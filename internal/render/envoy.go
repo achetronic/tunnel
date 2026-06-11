@@ -2,6 +2,8 @@ package render
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"sort"
 	"text/template"
 )
@@ -70,11 +72,13 @@ const ldsTpl = `resources:
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
             common_tls_context:
-              tls_certificates:
-                - certificate_chain:
-                    filename: {{ .TLS.CertPath }}
-                  private_key:
-                    filename: {{ .TLS.KeyPath }}
+              tls_certificate_sds_secret_configs:
+                - name: {{ .TLS.CertSecretName }}
+                  sds_config:
+                    path_config_source:
+                      path: {{ .TLS.SDSPath }}
+                      watched_directory:
+                        path: {{ .TLS.WatchedDir }}
       {{- else if and .TLS (eq .TLS.Mode "mutual") }}
       - filters:
           - name: envoy.filters.network.tcp_proxy
@@ -91,14 +95,20 @@ const ldsTpl = `resources:
             "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
             require_client_certificate: true
             common_tls_context:
-              tls_certificates:
-                - certificate_chain:
-                    filename: {{ .TLS.CertPath }}
-                  private_key:
-                    filename: {{ .TLS.KeyPath }}
-              validation_context:
-                trusted_ca:
-                  filename: {{ .TLS.CAPath }}
+              tls_certificate_sds_secret_configs:
+                - name: {{ .TLS.CertSecretName }}
+                  sds_config:
+                    path_config_source:
+                      path: {{ .TLS.SDSPath }}
+                      watched_directory:
+                        path: {{ .TLS.WatchedDir }}
+              validation_context_sds_secret_config:
+                name: {{ .TLS.CASecretName }}
+                sds_config:
+                  path_config_source:
+                    path: {{ .TLS.SDSPath }}
+                    watched_directory:
+                      path: {{ .TLS.WatchedDir }}
       {{- else }}
       - filters:
           - name: envoy.filters.network.tcp_proxy
@@ -216,4 +226,106 @@ func RenderEnvoyCDS(cfg EnvoyConfig) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// secretTypeURL is the type URL of an Envoy SDS Secret resource.
+const secretTypeURL = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret"
+
+// EnvoySDSConfig is the input to RenderEnvoySDS: one binding's TLS material plus
+// the SDS secret names the listener references. CertPEM/KeyPEM are required for
+// offload and mutual; CAPEM and CASecretName are required only for mutual.
+type EnvoySDSConfig struct {
+	// Mode is the TLS mode: "offload" or "mutual".
+	Mode string
+	// CertSecretName is the SDS resource name for the server certificate secret.
+	CertSecretName string
+	// CertPEM is the PEM-encoded server certificate chain.
+	CertPEM []byte
+	// KeyPEM is the PEM-encoded server private key.
+	KeyPEM []byte
+	// CASecretName is the SDS resource name for the CA validation secret (mutual).
+	CASecretName string
+	// CAPEM is the PEM-encoded CA certificate used to validate client certs (mutual).
+	CAPEM []byte
+}
+
+// sdsDocument is the on-disk SDS document Envoy reads via a file path_config_source.
+type sdsDocument struct {
+	Resources []sdsResource `json:"resources"`
+}
+
+// sdsResource is one Envoy SDS Secret resource (a cert/key pair or a CA context).
+type sdsResource struct {
+	Type              string             `json:"@type"`
+	Name              string             `json:"name"`
+	TLSCertificate    *sdsTLSCertificate `json:"tls_certificate,omitempty"`
+	ValidationContext *sdsValidation     `json:"validation_context,omitempty"`
+}
+
+// sdsTLSCertificate carries the server cert chain and private key inline.
+type sdsTLSCertificate struct {
+	CertificateChain sdsInlineString `json:"certificate_chain"`
+	PrivateKey       sdsInlineString `json:"private_key"`
+}
+
+// sdsValidation carries the trusted CA used to verify client certificates inline.
+type sdsValidation struct {
+	TrustedCA sdsInlineString `json:"trusted_ca"`
+}
+
+// sdsInlineString is an Envoy DataSource carrying its bytes inline as a string.
+type sdsInlineString struct {
+	InlineString string `json:"inline_string"`
+}
+
+// RenderEnvoySDS renders the SDS document for one offload/mutual binding. The
+// certificate, key and (for mutual) CA are embedded inline so the whole secret
+// is swapped atomically as a single file: a rotation never exposes a half-updated
+// cert/key pair, and the atomic move triggers Envoy's graceful SDS reload. The
+// output is deterministic JSON (valid YAML), so it participates in the state hash
+// like every other artifact. It carries private key material and must be written
+// with 0600 permissions.
+func RenderEnvoySDS(cfg EnvoySDSConfig) ([]byte, error) {
+	if cfg.Mode != "offload" && cfg.Mode != "mutual" {
+		return nil, fmt.Errorf("render SDS: unsupported mode %q", cfg.Mode)
+	}
+	if cfg.CertSecretName == "" {
+		return nil, fmt.Errorf("render SDS: cert secret name is empty")
+	}
+	if len(cfg.CertPEM) == 0 || len(cfg.KeyPEM) == 0 {
+		return nil, fmt.Errorf("render SDS: cert and key must not be empty")
+	}
+
+	doc := sdsDocument{
+		Resources: []sdsResource{
+			{
+				Type: secretTypeURL,
+				Name: cfg.CertSecretName,
+				TLSCertificate: &sdsTLSCertificate{
+					CertificateChain: sdsInlineString{InlineString: string(cfg.CertPEM)},
+					PrivateKey:       sdsInlineString{InlineString: string(cfg.KeyPEM)},
+				},
+			},
+		},
+	}
+
+	if cfg.Mode == "mutual" {
+		if cfg.CASecretName == "" {
+			return nil, fmt.Errorf("render SDS: mutual mode requires a CA secret name")
+		}
+		if len(cfg.CAPEM) == 0 {
+			return nil, fmt.Errorf("render SDS: mutual mode requires CA material")
+		}
+		doc.Resources = append(doc.Resources, sdsResource{
+			Type:              secretTypeURL,
+			Name:              cfg.CASecretName,
+			ValidationContext: &sdsValidation{TrustedCA: sdsInlineString{InlineString: string(cfg.CAPEM)}},
+		})
+	}
+
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("render SDS: marshal: %w", err)
+	}
+	return append(out, '\n'), nil
 }

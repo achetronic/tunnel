@@ -18,8 +18,10 @@ resources:
           typed_config:
             "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
             common_tls_context:
-              tls_certificates:
-                - certificate_chain:
-                    filename: /etc/envoy/tls/https_offload.crt
-                  private_key:
-                    filename: /etc/envoy/tls/https_offload.key
+              tls_certificate_sds_secret_configs:
+                - name: https_offload
+                  sds_config:
+                    path_config_source:
+                      path: /etc/envoy/tls/https_offload.sds.yaml
+                      watched_directory:
+                        path: /etc/envoy/tls

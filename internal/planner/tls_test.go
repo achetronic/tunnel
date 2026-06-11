@@ -83,11 +83,11 @@ func TestBuildPlan_TLSOffload(t *testing.T) {
 	if m.BindingName != "https" || m.SecretName != "web-tls" || m.SecretNamespace != "default" || m.Mode != modeOffload {
 		t.Fatalf("unexpected TLS material metadata: %+v", m)
 	}
-	if m.CertPath != "/etc/envoy/tls/https.crt" || m.KeyPath != "/etc/envoy/tls/https.key" {
-		t.Fatalf("unexpected cert/key paths: %+v", m)
+	if m.SDSPath != "/etc/envoy/tls/https.sds.yaml" || m.CertSecretName != "https" {
+		t.Fatalf("unexpected SDS path/secret name: %+v", m)
 	}
-	if m.CAPath != "" {
-		t.Fatalf("offload must not set a CA path, got %q", m.CAPath)
+	if m.CASecretName != "" {
+		t.Fatalf("offload must not set a CA secret name, got %q", m.CASecretName)
 	}
 	// Verify default health-check settings appear in the rendered CDS.
 	cds := string(plan.EnvoyCDS)
@@ -115,8 +115,9 @@ func TestBuildPlan_TLSMutual(t *testing.T) {
 	if len(plan.TLSMaterials) != 1 {
 		t.Fatalf("mutual must produce 1 TLS material, got %d", len(plan.TLSMaterials))
 	}
-	if got := plan.TLSMaterials[0].CAPath; got != "/etc/envoy/tls/grpc.ca.crt" {
-		t.Fatalf("mutual must set CA path, got %q", got)
+	m := plan.TLSMaterials[0]
+	if m.SDSPath != "/etc/envoy/tls/grpc.sds.yaml" || m.CertSecretName != "grpc" || m.CASecretName != "grpc-ca" {
+		t.Fatalf("mutual must set SDS path and secret names, got %+v", m)
 	}
 }
 

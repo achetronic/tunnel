@@ -293,7 +293,7 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 		return metav1.ConditionFalse, "KeyGenerationFailed", fmt.Sprintf("Failed to ensure VPS keypair: %v", err), err
 	}
 
-	bindings, err := r.collectBindings(ctx, node.Name)
+	bindings, err := r.collectBindings(ctx, node)
 	if err != nil {
 		return metav1.ConditionFalse, "PortBindingListFailed", fmt.Sprintf("Failed to list PortBindings: %v", err), err
 	}

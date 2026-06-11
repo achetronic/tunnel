@@ -18,11 +18,17 @@ resources:
             "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
             require_client_certificate: true
             common_tls_context:
-              tls_certificates:
-                - certificate_chain:
-                    filename: /etc/envoy/tls/grpc_mtls.crt
-                  private_key:
-                    filename: /etc/envoy/tls/grpc_mtls.key
-              validation_context:
-                trusted_ca:
-                  filename: /etc/envoy/tls/ca.crt
+              tls_certificate_sds_secret_configs:
+                - name: grpc_mtls
+                  sds_config:
+                    path_config_source:
+                      path: /etc/envoy/tls/grpc_mtls.sds.yaml
+                      watched_directory:
+                        path: /etc/envoy/tls
+              validation_context_sds_secret_config:
+                name: grpc_mtls-ca
+                sds_config:
+                  path_config_source:
+                    path: /etc/envoy/tls/grpc_mtls.sds.yaml
+                    watched_directory:
+                      path: /etc/envoy/tls

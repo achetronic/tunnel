@@ -65,8 +65,8 @@ func BuildPlan(
 		return nil, fmt.Errorf("relay ip error: %w", err)
 	}
 
-	// Hallazgo #9: usar MaskBits() en lugar de strings.Split sobre el CIDR,
-	// evitando duplicar la logica que ipam.New ya ejecuto al parsear el prefijo.
+	// Use MaskBits() instead of re-splitting the CIDR string, reusing the parse
+	// ipam.New already performed on the prefix.
 	mask := ipCalc.MaskBits()
 
 	mtu := node.Spec.Tunnel.MTU
@@ -278,20 +278,20 @@ func resolveEnvoyHealthCheck(hc v1alpha1.HealthCheckSpec) render.EnvoyHealthChec
 // validateBuildPlanInputs enforces the BuildPlan preconditions, returning a
 // descriptive error for the first violation found.
 func validateBuildPlanInputs(node *v1alpha1.EdgeNode, resolver TargetResolver, vpsPrivKey, vpsPubKey string, uplinkKeys map[int32]string) error {
-	// Hallazgo #1: guard node nil antes de cualquier desreferencia.
+	// Guard against a nil node before any dereference.
 	if node == nil {
 		return fmt.Errorf("node is nil")
 	}
-	// Hallazgo #4: clave privada vacia produce config sintacticamente valida pero rota.
+	// An empty private key produces a syntactically valid but broken config.
 	if vpsPrivKey == "" {
 		return fmt.Errorf("vpsPrivKey is empty")
 	}
-	// La clave publica del relay es el peer del uplink; vacia rompe el tunel.
+	// The relay public key is the uplink's peer; empty breaks the tunnel.
 	if vpsPubKey == "" {
 		return fmt.Errorf("vpsPubKey is empty")
 	}
-	// Hallazgo #19: map nil es semanticamente distinto de map vacio; lo rechazamos
-	// explicitamente para que el contrato sea inequivoco.
+	// A nil map is semantically distinct from an empty one; reject it explicitly
+	// so the contract is unambiguous.
 	if uplinkKeys == nil {
 		return fmt.Errorf("uplinkKeys is nil")
 	}
@@ -308,7 +308,7 @@ func buildRelayPeers(ipCalc *ipam.IPAM, uplinkKeys map[int32]string, replicas in
 	for i := range replicas {
 		replicaIP, err := ipCalc.ReplicaIP(i)
 		if err != nil {
-			// Hallazgo #6: wrapping con contexto de fase y ordinal.
+			// Wrap with the phase and ordinal for context.
 			return nil, fmt.Errorf("wg peers: replica %d ip: %w", i, err)
 		}
 		pubKey := uplinkKeys[i]
@@ -348,25 +348,30 @@ func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1
 	return allDefs, nil
 }
 
-// tlsCertPath returns the VPS path for the server certificate of a binding.
-func tlsCertPath(bindingName string) string {
-	return "/etc/envoy/tls/" + bindingName + ".crt"
+// tlsDir is the directory on the VPS holding the per-binding SDS documents. It
+// is the watched_directory Envoy monitors for atomic moves to hot-reload a
+// rotated certificate without bouncing connections.
+const tlsDir = "/etc/envoy/tls"
+
+// tlsSDSPath returns the VPS path for the SDS document of a binding.
+func tlsSDSPath(bindingName string) string {
+	return tlsDir + "/" + bindingName + ".sds.yaml"
 }
 
-// tlsKeyPath returns the VPS path for the private key of a binding.
-func tlsKeyPath(bindingName string) string {
-	return "/etc/envoy/tls/" + bindingName + ".key"
+// tlsCertSecretName returns the SDS secret name for a binding's server cert/key.
+func tlsCertSecretName(bindingName string) string {
+	return bindingName
 }
 
-// tlsCAPath returns the VPS path for the CA certificate of a binding.
-func tlsCAPath(bindingName string) string {
-	return "/etc/envoy/tls/" + bindingName + ".ca.crt"
+// tlsCASecretName returns the SDS secret name for a binding's client-CA context.
+func tlsCASecretName(bindingName string) string {
+	return bindingName + "-ca"
 }
 
 // buildTLSConfig converts a v1alpha1.TLSConfig into a render.EnvoyTLSConfig
-// using deterministic VPS paths derived from bindingName. It returns an error
-// when mode is offload or mutual and SecretRef is nil (belt-and-suspenders
-// check; CEL already rejects this at admission time).
+// using deterministic VPS SDS paths and secret names derived from bindingName.
+// It returns an error when mode is offload or mutual and SecretRef is nil
+// (belt-and-suspenders check; CEL already rejects this at admission time).
 func buildTLSConfig(bindingName string, cfg *v1alpha1.TLSConfig) (*render.EnvoyTLSConfig, error) {
 	if cfg == nil {
 		return nil, nil
@@ -380,19 +385,21 @@ func buildTLSConfig(bindingName string, cfg *v1alpha1.TLSConfig) (*render.EnvoyT
 			return nil, fmt.Errorf("binding %s: mode offload requires a secretRef", bindingName)
 		}
 		return &render.EnvoyTLSConfig{
-			Mode:     "offload",
-			CertPath: tlsCertPath(bindingName),
-			KeyPath:  tlsKeyPath(bindingName),
+			Mode:           "offload",
+			SDSPath:        tlsSDSPath(bindingName),
+			WatchedDir:     tlsDir,
+			CertSecretName: tlsCertSecretName(bindingName),
 		}, nil
 	case "mutual":
 		if cfg.SecretRef == nil {
 			return nil, fmt.Errorf("binding %s: mode mutual requires a secretRef", bindingName)
 		}
 		return &render.EnvoyTLSConfig{
-			Mode:     "mutual",
-			CertPath: tlsCertPath(bindingName),
-			KeyPath:  tlsKeyPath(bindingName),
-			CAPath:   tlsCAPath(bindingName),
+			Mode:           "mutual",
+			SDSPath:        tlsSDSPath(bindingName),
+			WatchedDir:     tlsDir,
+			CertSecretName: tlsCertSecretName(bindingName),
+			CASecretName:   tlsCASecretName(bindingName),
 		}, nil
 	default:
 		return nil, fmt.Errorf("binding %s: unknown TLS mode %q", bindingName, cfg.Mode)
@@ -426,7 +433,7 @@ func buildEnvoyListeners(allDefs []v1alpha1.PortBindingDefinition, resolver Targ
 		for i := range replicas {
 			replicaIP, err := ipCalc.ReplicaIP(i)
 			if err != nil {
-				// Hallazgo #6: wrapping con contexto de fase y ordinal.
+				// Wrap with the phase and ordinal for context.
 				return nil, nil, fmt.Errorf("envoy upstreams: replica %d ip: %w", i, err)
 			}
 			listener.Upstreams = append(listener.Upstreams, render.EnvoyUpstreamServer{
@@ -459,7 +466,7 @@ func resolveTarget(def v1alpha1.PortBindingDefinition, resolver TargetResolver) 
 		}
 		return ip, def.Target.Service.Port, nil
 	}
-	// Hallazgo #5: validar Address y Port en el branch directo.
+	// Validate the address and port in the direct-target branch.
 	if def.Target.Address == "" {
 		return "", 0, fmt.Errorf("binding %s: target address is empty", def.Name)
 	}
@@ -518,8 +525,8 @@ func buildTLSMaterials(allDefs []v1alpha1.PortBindingDefinition) ([]TLSMaterial,
 				SecretName:      def.TLS.SecretRef.Name,
 				SecretNamespace: def.TLS.SecretRef.Namespace,
 				Mode:            "offload",
-				CertPath:        tlsCertPath(def.Name),
-				KeyPath:         tlsKeyPath(def.Name),
+				SDSPath:         tlsSDSPath(def.Name),
+				CertSecretName:  tlsCertSecretName(def.Name),
 			})
 		case "mutual":
 			if def.TLS.SecretRef == nil {
@@ -530,9 +537,9 @@ func buildTLSMaterials(allDefs []v1alpha1.PortBindingDefinition) ([]TLSMaterial,
 				SecretName:      def.TLS.SecretRef.Name,
 				SecretNamespace: def.TLS.SecretRef.Namespace,
 				Mode:            "mutual",
-				CertPath:        tlsCertPath(def.Name),
-				KeyPath:         tlsKeyPath(def.Name),
-				CAPath:          tlsCAPath(def.Name),
+				SDSPath:         tlsSDSPath(def.Name),
+				CertSecretName:  tlsCertSecretName(def.Name),
+				CASecretName:    tlsCASecretName(def.Name),
 			})
 		default:
 			return nil, fmt.Errorf("binding %s: unknown TLS mode %q", def.Name, def.TLS.Mode)
