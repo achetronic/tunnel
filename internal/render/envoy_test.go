@@ -97,6 +97,69 @@ func TestRenderEnvoyLDSAndCDS(t *testing.T) {
 	}
 }
 
+// TestRenderEnvoySDS verifies the SDS document embeds the cert/key inline for
+// offload, adds a CA validation resource for mutual, is deterministic, and
+// rejects incomplete input.
+func TestRenderEnvoySDS(t *testing.T) {
+	offload, err := RenderEnvoySDS(EnvoySDSConfig{
+		Mode:           "offload",
+		CertSecretName: "web",
+		CertPEM:        []byte("CERTPEM"),
+		KeyPEM:         []byte("KEYPEM"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offload2, err := RenderEnvoySDS(EnvoySDSConfig{
+		Mode:           "offload",
+		CertSecretName: "web",
+		CertPEM:        []byte("CERTPEM"),
+		KeyPEM:         []byte("KEYPEM"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(offload, offload2) {
+		t.Fatal("RenderEnvoySDS is not deterministic")
+	}
+	for _, want := range []string{secretTypeURL, `"name": "web"`, "tls_certificate", "inline_string", "CERTPEM", "KEYPEM"} {
+		if !bytes.Contains(offload, []byte(want)) {
+			t.Fatalf("offload SDS missing %q;\n%s", want, offload)
+		}
+	}
+	if bytes.Contains(offload, []byte("validation_context")) {
+		t.Fatal("offload SDS must not contain a validation_context")
+	}
+
+	mutual, err := RenderEnvoySDS(EnvoySDSConfig{
+		Mode:           "mutual",
+		CertSecretName: "grpc",
+		CertPEM:        []byte("CERTPEM"),
+		KeyPEM:         []byte("KEYPEM"),
+		CASecretName:   "grpc-ca",
+		CAPEM:          []byte("CAPEM"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"name": "grpc"`, `"name": "grpc-ca"`, "validation_context", "trusted_ca", "CAPEM"} {
+		if !bytes.Contains(mutual, []byte(want)) {
+			t.Fatalf("mutual SDS missing %q;\n%s", want, mutual)
+		}
+	}
+
+	// Incomplete input is rejected.
+	if _, err := RenderEnvoySDS(EnvoySDSConfig{Mode: "offload", CertSecretName: "web", CertPEM: []byte("x")}); err == nil {
+		t.Fatal("expected error when the private key is empty")
+	}
+	if _, err := RenderEnvoySDS(EnvoySDSConfig{Mode: "mutual", CertSecretName: "g", CertPEM: []byte("c"), KeyPEM: []byte("k")}); err == nil {
+		t.Fatal("expected error when mutual mode lacks CA material")
+	}
+	if _, err := RenderEnvoySDS(EnvoySDSConfig{Mode: "passthrough", CertSecretName: "x", CertPEM: []byte("c"), KeyPEM: []byte("k")}); err == nil {
+		t.Fatal("expected error for unsupported mode")
+	}
+}
+
 // TestRenderEnvoyLDS_TLSPassthrough verifies that a TCP listener with
 // TLS mode "passthrough" emits a tls_inspector listener_filter and a
 // filter_chain_match on server_names without a downstream transport_socket.
@@ -167,9 +230,10 @@ func TestRenderEnvoyLDS_TLSOffload(t *testing.T) {
 					IdleTimeout:    "300s",
 				},
 				TLS: &EnvoyTLSConfig{
-					Mode:     "offload",
-					CertPath: "/etc/envoy/tls/https_offload.crt",
-					KeyPath:  "/etc/envoy/tls/https_offload.key",
+					Mode:           "offload",
+					SDSPath:        "/etc/envoy/tls/https_offload.sds.yaml",
+					WatchedDir:     "/etc/envoy/tls",
+					CertSecretName: "https_offload",
 				},
 			},
 		},
@@ -191,11 +255,20 @@ func TestRenderEnvoyLDS_TLSOffload(t *testing.T) {
 	if !bytes.Contains(out, []byte("DownstreamTlsContext")) {
 		t.Fatal("missing DownstreamTlsContext in offload output")
 	}
-	if !bytes.Contains(out, []byte("https_offload.crt")) {
-		t.Fatal("missing certificate_chain path in offload output")
+	if !bytes.Contains(out, []byte("tls_certificate_sds_secret_configs")) {
+		t.Fatal("missing SDS secret config in offload output")
 	}
-	if !bytes.Contains(out, []byte("https_offload.key")) {
-		t.Fatal("missing private_key path in offload output")
+	if !bytes.Contains(out, []byte("name: https_offload")) {
+		t.Fatal("missing SDS cert secret name in offload output")
+	}
+	if !bytes.Contains(out, []byte("/etc/envoy/tls/https_offload.sds.yaml")) {
+		t.Fatal("missing SDS path in offload output")
+	}
+	if !bytes.Contains(out, []byte("watched_directory")) {
+		t.Fatal("missing watched_directory in offload output")
+	}
+	if bytes.Contains(out, []byte("filename:")) {
+		t.Fatal("offload must not reference cert material by filename (use SDS)")
 	}
 	if bytes.Contains(out, []byte("require_client_certificate")) {
 		t.Fatal("offload must NOT contain require_client_certificate")
@@ -212,7 +285,7 @@ func TestRenderEnvoyLDS_TLSOffload(t *testing.T) {
 
 // TestRenderEnvoyLDS_TLSMutual verifies that a TCP listener with TLS mode
 // "mutual" emits a DownstreamTlsContext with require_client_certificate: true
-// and a validation_context referencing CAPath.
+// and an SDS validation_context_sds_secret_config for the client CA.
 func TestRenderEnvoyLDS_TLSMutual(t *testing.T) {
 	cfg := EnvoyConfig{
 		Listeners: []EnvoyListener{
@@ -228,10 +301,11 @@ func TestRenderEnvoyLDS_TLSMutual(t *testing.T) {
 					ConnectTimeout: "10s",
 				},
 				TLS: &EnvoyTLSConfig{
-					Mode:     "mutual",
-					CertPath: "/etc/envoy/tls/grpc_mtls.crt",
-					KeyPath:  "/etc/envoy/tls/grpc_mtls.key",
-					CAPath:   "/etc/envoy/tls/ca.crt",
+					Mode:           "mutual",
+					SDSPath:        "/etc/envoy/tls/grpc_mtls.sds.yaml",
+					WatchedDir:     "/etc/envoy/tls",
+					CertSecretName: "grpc_mtls",
+					CASecretName:   "grpc_mtls-ca",
 				},
 			},
 		},
@@ -256,14 +330,20 @@ func TestRenderEnvoyLDS_TLSMutual(t *testing.T) {
 	if !bytes.Contains(out, []byte("require_client_certificate: true")) {
 		t.Fatal("missing require_client_certificate in mutual output")
 	}
-	if !bytes.Contains(out, []byte("ca.crt")) {
-		t.Fatal("missing trusted_ca path in mutual output")
+	if !bytes.Contains(out, []byte("validation_context_sds_secret_config")) {
+		t.Fatal("missing validation_context SDS config in mutual output")
 	}
-	if !bytes.Contains(out, []byte("grpc_mtls.crt")) {
-		t.Fatal("missing certificate_chain path in mutual output")
+	if !bytes.Contains(out, []byte("name: grpc_mtls-ca")) {
+		t.Fatal("missing SDS CA secret name in mutual output")
 	}
-	if !bytes.Contains(out, []byte("grpc_mtls.key")) {
-		t.Fatal("missing private_key path in mutual output")
+	if !bytes.Contains(out, []byte("name: grpc_mtls\n")) {
+		t.Fatal("missing SDS cert secret name in mutual output")
+	}
+	if !bytes.Contains(out, []byte("/etc/envoy/tls/grpc_mtls.sds.yaml")) {
+		t.Fatal("missing SDS path in mutual output")
+	}
+	if bytes.Contains(out, []byte("filename:")) {
+		t.Fatal("mutual must not reference cert material by filename (use SDS)")
 	}
 	if bytes.Contains(out, []byte("tls_inspector")) {
 		t.Fatal("mutual must NOT contain tls_inspector")

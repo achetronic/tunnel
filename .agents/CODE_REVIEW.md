@@ -45,23 +45,28 @@ sits on disk while Envoy keeps serving the old one until it expires — a silent
 outage of the TLS listener. The architecture doc claims rotation hot-reloads
 automatically; it did not.
 
-**Fix.** `applyEnvoyConfig` now returns whether it moved a discovery file and
-`ensureEnvoyRunning` returns whether it (re)started the service. `Enroll`
-restarts Envoy **only** when TLS material was (re)written this round AND neither
-a config change nor a fresh start already reloaded it
-(`tlsApplied && !envoyConfigChanged && !envoyStarted`). This keeps steady-state
-reconciles from bouncing connections (the original goal) while guaranteeing a
-rotated cert is actually served. Regression test:
-`TestEnroll_TLSRotationRestartsEnvoy`.
+**Fix (shipped: file-based SDS, zero-downtime).** Certificates are no longer
+referenced by inline `filename`. The render now emits
+`tls_certificate_sds_secret_configs` (and, for `mutual`,
+`validation_context_sds_secret_config`) sourced from a per-binding SDS document
+`/etc/envoy/tls/<binding>.sds.yaml` with `watched_directory: /etc/envoy/tls`.
+The controller (`collectTLSFiles`) reads the Secret and renders that SDS document
+with the cert/key (and CA for mutual) embedded **inline** via a new pure
+`render.RenderEnvoySDS`. `Enroll` writes it with the existing temp + `chmod 600`
++ atomic `mv` into the watched directory. Per the Envoy v1.29.3 docs, a move into
+a `watched_directory` reloads the secret **gracefully — no listener rebuild, no
+dropped connections, no restart**. Inlining cert+key in one file makes the swap
+atomic, so a rotation never exposes a half-updated pair. The earlier interim fix
+(restart Envoy on rotation) was therefore removed; `applyEnvoyConfig` /
+`ensureEnvoyRunning` are back to their original signatures. Regression tests:
+`render.TestRenderEnvoySDS`, `provision.TestEnroll_TLSRotationReloadsViaSDS`
+(asserts the SDS file is swapped atomically and Envoy is *not* restarted), and
+the updated render golden files for the offload/mutual listener shapes.
 
-**Trade-off / follow-up.** A cert-only rotation now causes one brief Envoy
-restart, which drops the affected L4 connections momentarily. That is strictly
-better than serving an expired cert, but it is not zero-downtime. The fully
-graceful, Envoy-native alternative is to deliver the certs via **file-based SDS
-with a `watched_directory`** (Envoy reloads the secret gracefully when the
-directory is atomically swapped) instead of inline `filename` references. That
-is a larger change to the render templates + bootstrap + enroll and is left as a
-recommended future improvement rather than done here.
+**Why this is the right end state.** It is the Envoy-native rotation mechanism
+(file-based SDS), keeps the existing file-based-xDS design (no gRPC control
+plane), and delivers the zero-downtime rotation the architecture promised. The
+LDS/CDS stay independent of cert content, so a rotation produces no LDS churn.
 
 ### F2 — `collectBindings` ignored the namespace (CRITICAL/correctness)
 **File:** `internal/controller/edgenode_utils.go` (`collectBindings`), caller
@@ -100,15 +105,15 @@ and trivial; purely cosmetic English/Spanish drift elsewhere was left alone.)
 
 ## Notes (intentionally not changed)
 
-### N1 — Orphaned TLS key material after a binding is removed (ROBUSTNESS/hygiene)
-`applyTLSFiles` writes/refreshes cert/key files under `/etc/envoy/tls/` but never
-prunes files for bindings that were deleted; only full `Teardown` wipes
-`/etc/envoy`. After removing a TLS binding the LDS no longer references the old
-cert (so Envoy won't use it), but the private key lingers on the edge until the
-node is torn down. Given the design treats key-on-edge as sensitive, pruning the
-`tls/` dir to exactly the current materials would be tidier. Low severity (no
-functional impact, key is unreferenced); left as a deliberate follow-up rather
-than risk changing the apply path in this pass.
+### N1 — Orphaned TLS material after a binding is removed (ROBUSTNESS/hygiene)
+`applyTLSFiles` writes/refreshes the per-binding `*.sds.yaml` documents under
+`/etc/envoy/tls/` but never prunes files for bindings that were deleted; only
+full `Teardown` wipes `/etc/envoy`. After removing a TLS binding the LDS no
+longer references the old SDS document (so Envoy won't load it), but the file —
+which carries the private key inline — lingers on the edge until the node is
+torn down. Given the design treats key-on-edge as sensitive, pruning the `tls/`
+dir to exactly the current materials would be tidier. Low severity (no
+functional impact, the secret is unreferenced); left as a deliberate follow-up.
 
 ### N2 — `agentrun.Run` does not observe its `ctx` for shutdown (NOTE)
 `Run(ctx, ...)` starts `watchConfig` and `srv.ListenAndServe()` but never uses

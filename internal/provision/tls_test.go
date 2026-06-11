@@ -81,12 +81,13 @@ func TestApplyTLSFiles_Idempotent(t *testing.T) {
 	}
 }
 
-// TestEnroll_TLSRotationRestartsEnvoy verifies that when only the TLS material
+// TestEnroll_TLSRotationReloadsViaSDS verifies that when only the TLS material
 // changes (the binding shape, and therefore the LDS/CDS, stays the same) Enroll
-// forces an Envoy restart so the rotated certificate is actually picked up.
-// File-based tls_certificate references are only re-read on a (re)load, so
-// without this a rotated cert would be written to disk but never served.
-func TestEnroll_TLSRotationRestartsEnvoy(t *testing.T) {
+// rewrites the per-binding SDS document atomically (temp + chmod 600 + mv into
+// the watched /etc/envoy/tls directory) and does NOT restart Envoy: the atomic
+// move triggers Envoy's graceful file-based SDS reload, so the rotated cert is
+// picked up with zero dropped connections.
+func TestEnroll_TLSRotationReloadsViaSDS(t *testing.T) {
 	fake := sshexec.NewFakeExecutor()
 
 	// State already in place for everything except the TLS material: relay,
@@ -119,7 +120,10 @@ func TestEnroll_TLSRotationRestartsEnvoy(t *testing.T) {
 		EnvoyCDSHash:      "c",
 	}
 
-	tlsApplied, err := Enroll(context.Background(), fake, plan, tlsTestFiles())
+	sdsPath := "/etc/envoy/tls/web.sds.yaml"
+	rotated := []TLSFile{{Path: sdsPath, Content: []byte(`{"resources":[]}`)}}
+
+	tlsApplied, err := Enroll(context.Background(), fake, plan, rotated)
 	if err != nil {
 		t.Fatalf("enroll failed: %v", err)
 	}
@@ -128,8 +132,17 @@ func TestEnroll_TLSRotationRestartsEnvoy(t *testing.T) {
 	}
 
 	joined := strings.Join(fake.Runs, "\n")
-	if !strings.Contains(joined, "systemctl restart envoy") {
-		t.Fatalf("expected an envoy restart to pick up the rotated cert; runs:\n%s", joined)
+	// The SDS document must be staged to a temp path and atomically moved into
+	// the watched directory (this is what triggers the graceful reload).
+	if _, ok := fake.Files[sdsPath+".tmp"]; !ok {
+		t.Fatal("SDS document was not streamed to its temp path")
+	}
+	if !strings.Contains(joined, "chmod 600 "+sdsPath+".tmp && mv "+sdsPath+".tmp "+sdsPath) {
+		t.Fatalf("SDS document was not installed atomically with 0600; runs:\n%s", joined)
+	}
+	// A cert rotation must NOT bounce Envoy: the SDS file move reloads it gracefully.
+	if strings.Contains(joined, "systemctl restart envoy") {
+		t.Fatalf("a TLS rotation must not restart Envoy (SDS reloads gracefully); runs:\n%s", joined)
 	}
 	// The LDS/CDS were unchanged, so no discovery file should have been moved.
 	if strings.Contains(joined, "mv /etc/envoy/lds.yaml.tmp") || strings.Contains(joined, "mv /etc/envoy/cds.yaml.tmp") {

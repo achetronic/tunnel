@@ -348,25 +348,30 @@ func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1
 	return allDefs, nil
 }
 
-// tlsCertPath returns the VPS path for the server certificate of a binding.
-func tlsCertPath(bindingName string) string {
-	return "/etc/envoy/tls/" + bindingName + ".crt"
+// tlsDir is the directory on the VPS holding the per-binding SDS documents. It
+// is the watched_directory Envoy monitors for atomic moves to hot-reload a
+// rotated certificate without bouncing connections.
+const tlsDir = "/etc/envoy/tls"
+
+// tlsSDSPath returns the VPS path for the SDS document of a binding.
+func tlsSDSPath(bindingName string) string {
+	return tlsDir + "/" + bindingName + ".sds.yaml"
 }
 
-// tlsKeyPath returns the VPS path for the private key of a binding.
-func tlsKeyPath(bindingName string) string {
-	return "/etc/envoy/tls/" + bindingName + ".key"
+// tlsCertSecretName returns the SDS secret name for a binding's server cert/key.
+func tlsCertSecretName(bindingName string) string {
+	return bindingName
 }
 
-// tlsCAPath returns the VPS path for the CA certificate of a binding.
-func tlsCAPath(bindingName string) string {
-	return "/etc/envoy/tls/" + bindingName + ".ca.crt"
+// tlsCASecretName returns the SDS secret name for a binding's client-CA context.
+func tlsCASecretName(bindingName string) string {
+	return bindingName + "-ca"
 }
 
 // buildTLSConfig converts a v1alpha1.TLSConfig into a render.EnvoyTLSConfig
-// using deterministic VPS paths derived from bindingName. It returns an error
-// when mode is offload or mutual and SecretRef is nil (belt-and-suspenders
-// check; CEL already rejects this at admission time).
+// using deterministic VPS SDS paths and secret names derived from bindingName.
+// It returns an error when mode is offload or mutual and SecretRef is nil
+// (belt-and-suspenders check; CEL already rejects this at admission time).
 func buildTLSConfig(bindingName string, cfg *v1alpha1.TLSConfig) (*render.EnvoyTLSConfig, error) {
 	if cfg == nil {
 		return nil, nil
@@ -380,19 +385,21 @@ func buildTLSConfig(bindingName string, cfg *v1alpha1.TLSConfig) (*render.EnvoyT
 			return nil, fmt.Errorf("binding %s: mode offload requires a secretRef", bindingName)
 		}
 		return &render.EnvoyTLSConfig{
-			Mode:     "offload",
-			CertPath: tlsCertPath(bindingName),
-			KeyPath:  tlsKeyPath(bindingName),
+			Mode:           "offload",
+			SDSPath:        tlsSDSPath(bindingName),
+			WatchedDir:     tlsDir,
+			CertSecretName: tlsCertSecretName(bindingName),
 		}, nil
 	case "mutual":
 		if cfg.SecretRef == nil {
 			return nil, fmt.Errorf("binding %s: mode mutual requires a secretRef", bindingName)
 		}
 		return &render.EnvoyTLSConfig{
-			Mode:     "mutual",
-			CertPath: tlsCertPath(bindingName),
-			KeyPath:  tlsKeyPath(bindingName),
-			CAPath:   tlsCAPath(bindingName),
+			Mode:           "mutual",
+			SDSPath:        tlsSDSPath(bindingName),
+			WatchedDir:     tlsDir,
+			CertSecretName: tlsCertSecretName(bindingName),
+			CASecretName:   tlsCASecretName(bindingName),
 		}, nil
 	default:
 		return nil, fmt.Errorf("binding %s: unknown TLS mode %q", bindingName, cfg.Mode)
@@ -518,8 +525,8 @@ func buildTLSMaterials(allDefs []v1alpha1.PortBindingDefinition) ([]TLSMaterial,
 				SecretName:      def.TLS.SecretRef.Name,
 				SecretNamespace: def.TLS.SecretRef.Namespace,
 				Mode:            "offload",
-				CertPath:        tlsCertPath(def.Name),
-				KeyPath:         tlsKeyPath(def.Name),
+				SDSPath:         tlsSDSPath(def.Name),
+				CertSecretName:  tlsCertSecretName(def.Name),
 			})
 		case "mutual":
 			if def.TLS.SecretRef == nil {
@@ -530,9 +537,9 @@ func buildTLSMaterials(allDefs []v1alpha1.PortBindingDefinition) ([]TLSMaterial,
 				SecretName:      def.TLS.SecretRef.Name,
 				SecretNamespace: def.TLS.SecretRef.Namespace,
 				Mode:            "mutual",
-				CertPath:        tlsCertPath(def.Name),
-				KeyPath:         tlsKeyPath(def.Name),
-				CAPath:          tlsCAPath(def.Name),
+				SDSPath:         tlsSDSPath(def.Name),
+				CertSecretName:  tlsCertSecretName(def.Name),
+				CASecretName:    tlsCASecretName(def.Name),
 			})
 		default:
 			return nil, fmt.Errorf("binding %s: unknown TLS mode %q", def.Name, def.TLS.Mode)

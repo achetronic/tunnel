@@ -37,6 +37,7 @@ import (
 	"github.com/achetronic/tunnel/internal/ipam"
 	"github.com/achetronic/tunnel/internal/planner"
 	"github.com/achetronic/tunnel/internal/provision"
+	"github.com/achetronic/tunnel/internal/render"
 	"github.com/achetronic/tunnel/internal/sshexec"
 	"github.com/achetronic/tunnel/internal/uplink"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -399,10 +400,12 @@ func (r *EdgeNodeReconciler) collectTLSFiles(
 				fmt.Errorf("%s", message)
 		}
 
-		files = append(files,
-			provision.TLSFile{Path: mat.CertPath, Content: cert},
-			provision.TLSFile{Path: mat.KeyPath, Content: key},
-		)
+		sdsCfg := render.EnvoySDSConfig{
+			Mode:           mat.Mode,
+			CertSecretName: mat.CertSecretName,
+			CertPEM:        cert,
+			KeyPEM:         key,
+		}
 
 		if mat.Mode == "mutual" {
 			ca, hasCA := secret.Data["ca.crt"]
@@ -414,8 +417,22 @@ func (r *EdgeNodeReconciler) collectTLSFiles(
 				return nil, metav1.ConditionFalse, tlsSecretIncompleteReason, message,
 					fmt.Errorf("%s", message)
 			}
-			files = append(files, provision.TLSFile{Path: mat.CAPath, Content: ca})
+			sdsCfg.CASecretName = mat.CASecretName
+			sdsCfg.CAPEM = ca
 		}
+
+		// Render the per-binding SDS document with the cert/key (and CA for
+		// mutual) embedded inline, so the whole secret is swapped atomically as a
+		// single file and Envoy hot-reloads it without a restart.
+		sdsDoc, sdsErr := render.RenderEnvoySDS(sdsCfg)
+		if sdsErr != nil {
+			message := fmt.Sprintf(
+				"failed to render SDS document for binding %q from Secret %s/%s: %v",
+				mat.BindingName, ns, mat.SecretName, sdsErr,
+			)
+			return nil, metav1.ConditionFalse, tlsSecretIncompleteReason, message, sdsErr
+		}
+		files = append(files, provision.TLSFile{Path: mat.SDSPath, Content: sdsDoc})
 	}
 	return files, metav1.ConditionTrue, "", "", nil
 }

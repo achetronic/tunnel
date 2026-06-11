@@ -30,27 +30,40 @@ type EnvoyUDPParams struct {
 
 // EnvoyTLSConfig describes the TLS behaviour for a TCP listener.
 // A nil pointer means no TLS (plain TCP, current default behaviour).
+//
+// For offload/mutual the certificate material is delivered to Envoy through
+// file-based SDS (Secret Discovery Service): the listener references a secret by
+// name, sourced from an on-disk SDS document watched via WatchedDirectory. This
+// lets Envoy hot-reload a rotated certificate gracefully (no listener rebuild,
+// no dropped connections) when the operator atomically swaps the SDS file,
+// instead of needing a restart.
 type EnvoyTLSConfig struct {
 	// Mode selects the TLS strategy. Accepted values:
 	//   "passthrough" - Envoy inspects the SNI and forwards the raw TLS
 	//                   stream to the upstream without terminating it.
-	//   "offload"     - Envoy terminates TLS using CertPath/KeyPath and
-	//                   forwards plain TCP to the upstream.
-	//   "mutual"      - Same as offload but also requires a client
-	//                   certificate validated against CAPath (mTLS).
+	//   "offload"     - Envoy terminates TLS using the SDS server certificate
+	//                   secret and forwards plain TCP to the upstream.
+	//   "mutual"      - Same as offload but also requires a client certificate
+	//                   validated against the SDS CA secret (mTLS).
 	Mode string
 
-	// CertPath is the path on the VPS to the server TLS certificate file
-	// (e.g. /etc/envoy/tls/mylistener.crt). Used in offload and mutual modes.
-	CertPath string
+	// SDSPath is the path on the VPS to the SDS document holding this binding's
+	// secrets (server cert/key inline, plus the CA for mutual). Used in offload
+	// and mutual modes, e.g. /etc/envoy/tls/mylistener.sds.yaml.
+	SDSPath string
 
-	// KeyPath is the path on the VPS to the server TLS private key file
-	// (e.g. /etc/envoy/tls/mylistener.key). Used in offload and mutual modes.
-	KeyPath string
+	// WatchedDir is the directory Envoy watches for atomic moves to trigger a
+	// graceful reload of SDSPath (the directory holding the SDS files). Used in
+	// offload and mutual modes, e.g. /etc/envoy/tls.
+	WatchedDir string
 
-	// CAPath is the path on the VPS to the CA certificate used to validate
-	// client certificates (e.g. /etc/envoy/tls/ca.crt). Used only in mutual mode.
-	CAPath string
+	// CertSecretName is the SDS secret name for the server certificate/key,
+	// matched against a resource inside SDSPath. Used in offload and mutual modes.
+	CertSecretName string
+
+	// CASecretName is the SDS secret name for the client-CA validation context,
+	// matched against a resource inside SDSPath. Used only in mutual mode.
+	CASecretName string
 }
 
 // EnvoyHealthCheck holds the active health-check policy the VPS Envoy applies to

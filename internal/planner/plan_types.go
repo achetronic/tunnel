@@ -22,14 +22,19 @@ type TargetResolver interface {
 // only for offload and mutual modes; passthrough never pushes key material to
 // the VPS so it does not appear here.
 //
-// Path convention (per-binding, not shared):
+// The controller reads the referenced Secret and renders a single SDS document
+// per binding at SDSPath, embedding the cert/key (and CA for mutual) inline. The
+// listener references those secrets by CertSecretName/CASecretName via file-based
+// SDS, so a rotation is an atomic swap of one file that Envoy hot-reloads.
 //
-//	/etc/envoy/tls/<bindingName>.crt  - server certificate
-//	/etc/envoy/tls/<bindingName>.key  - server private key
-//	/etc/envoy/tls/<bindingName>.ca.crt - CA certificate (mutual only)
+// Path/name convention (per-binding, not shared):
 //
-// Using per-binding paths avoids collisions when multiple bindings share the
-// same CA or rotate certificates independently.
+//	/etc/envoy/tls/<bindingName>.sds.yaml - SDS document (cert/key inline, +CA for mutual)
+//	secret name <bindingName>             - server certificate/key
+//	secret name <bindingName>-ca          - client-CA validation context (mutual only)
+//
+// Using per-binding files avoids collisions when multiple bindings rotate
+// certificates independently.
 type TLSMaterial struct {
 	// BindingName is the name of the PortBindingDefinition this entry belongs to.
 	BindingName string
@@ -41,13 +46,13 @@ type TLSMaterial struct {
 	SecretNamespace string
 	// Mode is the TLS mode: offload or mutual.
 	Mode string
-	// CertPath is the destination path on the VPS for the server certificate.
-	CertPath string
-	// KeyPath is the destination path on the VPS for the server private key.
-	KeyPath string
-	// CAPath is the destination path on the VPS for the CA certificate.
+	// SDSPath is the destination path on the VPS for the binding's SDS document.
+	SDSPath string
+	// CertSecretName is the SDS resource name for the server certificate/key.
+	CertSecretName string
+	// CASecretName is the SDS resource name for the CA validation context.
 	// Only set when Mode is mutual; empty otherwise.
-	CAPath string
+	CASecretName string
 }
 
 // Plan is the complete desired state for the VPS and its uplink replicas.
