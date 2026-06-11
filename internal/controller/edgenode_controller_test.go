@@ -369,3 +369,54 @@ var _ = Describe("ensureUplinkKeys", func() {
 		Expect(string(sec.Data["priv-0"])).To(Equal(original))
 	})
 })
+
+var _ = Describe("collectBindings namespace isolation", func() {
+	ctx := context.Background()
+
+	newReconciler := func() *EdgeNodeReconciler {
+		return &EdgeNodeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+	}
+	node := func(name, namespace string) *tunnelv1alpha1.EdgeNode {
+		return &tunnelv1alpha1.EdgeNode{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+	}
+
+	It("does not aggregate PortBindings of an EdgeNode that only shares the name in another namespace", func() {
+		r := newReconciler()
+
+		By("creating two namespaces")
+		for _, n := range []string{"cb-nsa", "cb-nsb"} {
+			nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: n}}
+			if err := k8sClient.Create(ctx, nsObj); err != nil && !errors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+
+		By("creating a PortBinding in cb-nsa targeting EdgeNode \"shared\" (ref namespace defaults to the PB's)")
+		pb := &tunnelv1alpha1.PortBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: "pb-ns", Namespace: "cb-nsa"},
+			Spec: tunnelv1alpha1.PortBindingSpec{
+				EdgeNodeRef: tunnelv1alpha1.ObjectReference{Name: "shared"},
+				Bindings: []tunnelv1alpha1.PortBindingDefinition{
+					{
+						Name:       "b1",
+						Protocol:   "TCP",
+						ListenPort: 8443,
+						Target:     tunnelv1alpha1.BindingTarget{Address: "10.0.0.5", Port: 443},
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, pb)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pb) })
+
+		By("the EdgeNode in cb-nsa picks up the binding")
+		got, err := r.collectBindings(ctx, node("shared", "cb-nsa"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(HaveLen(1))
+
+		By("the same-named EdgeNode in cb-nsb does NOT pick up the cross-namespace binding")
+		got, err = r.collectBindings(ctx, node("shared", "cb-nsb"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(BeEmpty())
+	})
+})

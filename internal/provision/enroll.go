@@ -94,11 +94,26 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 	if err != nil {
 		return false, err
 	}
-	if err := applyEnvoyConfig(ctx, exec, plan, state); err != nil {
+	envoyConfigChanged, err := applyEnvoyConfig(ctx, exec, plan, state)
+	if err != nil {
 		return false, err
 	}
-	if err := ensureEnvoyRunning(ctx, exec); err != nil {
+	envoyStarted, err := ensureEnvoyRunning(ctx, exec)
+	if err != nil {
 		return false, err
+	}
+	// File-based TLS certificates are referenced by filename inside the listener
+	// config, and Envoy only (re)reads them when the listener is (re)loaded, not
+	// when the file content changes underneath it. A certificate rotation that
+	// keeps the same binding shape leaves the LDS/CDS unchanged, so unless
+	// something else reloaded Envoy this round it would keep serving the previous
+	// certificate until it expires (a silent outage). When the material was
+	// (re)written but neither a config change nor a fresh start already reloaded
+	// Envoy, force a restart so the new key/cert is picked up.
+	if tlsApplied && !envoyConfigChanged && !envoyStarted {
+		if err := RestartEnvoy(ctx, exec); err != nil {
+			return false, err
+		}
 	}
 	return tlsApplied, nil
 }
@@ -269,44 +284,51 @@ func applyRelayDocument(ctx context.Context, exec sshexec.Executor, plan *planne
 }
 
 // applyEnvoyConfig syncs the Envoy LDS and CDS discovery files when their plan
-// hashes changed, persisting each new hash as it is applied.
-func applyEnvoyConfig(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, state *State) error {
+// hashes changed, persisting each new hash as it is applied. It reports whether
+// it moved either file: a move retriggers Envoy's inotify-based hot reload, which
+// also re-reads any certificate files the listeners reference.
+func applyEnvoyConfig(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, state *State) (bool, error) {
+	changed := false
 	if state.EnvoyLDSHash != plan.EnvoyLDSHash {
 		slog.Info("enroll: applying envoy LDS config")
 		if err := exec.Put(ctx, "/etc/envoy/lds.yaml.tmp", plan.EnvoyLDS); err != nil {
-			return fmt.Errorf("failed to put lds.yaml.tmp: %w", err)
+			return false, fmt.Errorf("failed to put lds.yaml.tmp: %w", err)
 		}
 		if _, err := exec.Run(ctx, "mv /etc/envoy/lds.yaml.tmp /etc/envoy/lds.yaml"); err != nil {
-			return fmt.Errorf("failed to rename lds.yaml: %w", err)
+			return false, fmt.Errorf("failed to rename lds.yaml: %w", err)
 		}
 
 		state.EnvoyLDSHash = plan.EnvoyLDSHash
 		if err := writeState(ctx, exec, state); err != nil {
-			return fmt.Errorf("failed to persist lds config state: %w", err)
+			return false, fmt.Errorf("failed to persist lds config state: %w", err)
 		}
+		changed = true
 	}
 
 	if state.EnvoyCDSHash != plan.EnvoyCDSHash {
 		slog.Info("enroll: applying envoy CDS config")
 		if err := exec.Put(ctx, "/etc/envoy/cds.yaml.tmp", plan.EnvoyCDS); err != nil {
-			return fmt.Errorf("failed to put cds.yaml.tmp: %w", err)
+			return false, fmt.Errorf("failed to put cds.yaml.tmp: %w", err)
 		}
 		if _, err := exec.Run(ctx, "mv /etc/envoy/cds.yaml.tmp /etc/envoy/cds.yaml"); err != nil {
-			return fmt.Errorf("failed to rename cds.yaml: %w", err)
+			return false, fmt.Errorf("failed to rename cds.yaml: %w", err)
 		}
 
 		state.EnvoyCDSHash = plan.EnvoyCDSHash
 		if err := writeState(ctx, exec, state); err != nil {
-			return fmt.Errorf("failed to persist cds config state: %w", err)
+			return false, fmt.Errorf("failed to persist cds config state: %w", err)
 		}
+		changed = true
 	}
-	return nil
+	return changed, nil
 }
 
 // ensureEnvoyRunning deploys the static bootstrap config that points Envoy at
 // the LDS/CDS files and makes sure the service is active, without restarting it
-// when it already runs.
-func ensureEnvoyRunning(ctx context.Context, exec sshexec.Executor) error {
+// when it already runs. It reports whether it actually (re)started the service,
+// so the caller can tell a fresh start (which already reads current cert files)
+// apart from a steady-state no-op.
+func ensureEnvoyRunning(ctx context.Context, exec sshexec.Executor) (bool, error) {
 	slog.Info("enroll: ensuring envoy is running")
 	// node id/cluster are mandatory in the bootstrap when dynamic_resources
 	// (file-based LDS/CDS) are used, otherwise Envoy refuses to load the config.
@@ -329,7 +351,7 @@ dynamic_resources:
       path: /etc/envoy/cds.yaml
 `
 	if err := exec.Put(ctx, "/etc/envoy/envoy.yaml", []byte(bootstrapYAML)); err != nil {
-		return fmt.Errorf("failed to put envoy.yaml bootstrap: %w", err)
+		return false, fmt.Errorf("failed to put envoy.yaml bootstrap: %w", err)
 	}
 
 	// Start envoy when it is not already active. If it is in a failed or
@@ -338,15 +360,20 @@ dynamic_resources:
 	// steady-state reconciles never bounce live connections.
 	out, err := exec.Run(ctx, "systemctl is-active envoy")
 	if err != nil && !isExitError(err) {
-		return fmt.Errorf("failed to query envoy status: %w", err)
+		return false, fmt.Errorf("failed to query envoy status: %w", err)
 	}
+	started := false
 	if strings.TrimSpace(out) != serviceActive {
 		if _, err := exec.Run(ctx, "systemctl enable envoy && systemctl restart envoy"); err != nil {
-			return fmt.Errorf("failed to start envoy: %w", err)
+			return false, fmt.Errorf("failed to start envoy: %w", err)
 		}
+		started = true
 	}
 
-	return waitEnvoyActive(ctx, exec)
+	if err := waitEnvoyActive(ctx, exec); err != nil {
+		return started, err
+	}
+	return started, nil
 }
 
 // RestartEnvoy restarts the Envoy service on the VPS and waits for it to become

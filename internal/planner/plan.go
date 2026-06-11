@@ -65,8 +65,8 @@ func BuildPlan(
 		return nil, fmt.Errorf("relay ip error: %w", err)
 	}
 
-	// Hallazgo #9: usar MaskBits() en lugar de strings.Split sobre el CIDR,
-	// evitando duplicar la logica que ipam.New ya ejecuto al parsear el prefijo.
+	// Use MaskBits() instead of re-splitting the CIDR string, reusing the parse
+	// ipam.New already performed on the prefix.
 	mask := ipCalc.MaskBits()
 
 	mtu := node.Spec.Tunnel.MTU
@@ -278,20 +278,20 @@ func resolveEnvoyHealthCheck(hc v1alpha1.HealthCheckSpec) render.EnvoyHealthChec
 // validateBuildPlanInputs enforces the BuildPlan preconditions, returning a
 // descriptive error for the first violation found.
 func validateBuildPlanInputs(node *v1alpha1.EdgeNode, resolver TargetResolver, vpsPrivKey, vpsPubKey string, uplinkKeys map[int32]string) error {
-	// Hallazgo #1: guard node nil antes de cualquier desreferencia.
+	// Guard against a nil node before any dereference.
 	if node == nil {
 		return fmt.Errorf("node is nil")
 	}
-	// Hallazgo #4: clave privada vacia produce config sintacticamente valida pero rota.
+	// An empty private key produces a syntactically valid but broken config.
 	if vpsPrivKey == "" {
 		return fmt.Errorf("vpsPrivKey is empty")
 	}
-	// La clave publica del relay es el peer del uplink; vacia rompe el tunel.
+	// The relay public key is the uplink's peer; empty breaks the tunnel.
 	if vpsPubKey == "" {
 		return fmt.Errorf("vpsPubKey is empty")
 	}
-	// Hallazgo #19: map nil es semanticamente distinto de map vacio; lo rechazamos
-	// explicitamente para que el contrato sea inequivoco.
+	// A nil map is semantically distinct from an empty one; reject it explicitly
+	// so the contract is unambiguous.
 	if uplinkKeys == nil {
 		return fmt.Errorf("uplinkKeys is nil")
 	}
@@ -308,7 +308,7 @@ func buildRelayPeers(ipCalc *ipam.IPAM, uplinkKeys map[int32]string, replicas in
 	for i := range replicas {
 		replicaIP, err := ipCalc.ReplicaIP(i)
 		if err != nil {
-			// Hallazgo #6: wrapping con contexto de fase y ordinal.
+			// Wrap with the phase and ordinal for context.
 			return nil, fmt.Errorf("wg peers: replica %d ip: %w", i, err)
 		}
 		pubKey := uplinkKeys[i]
@@ -426,7 +426,7 @@ func buildEnvoyListeners(allDefs []v1alpha1.PortBindingDefinition, resolver Targ
 		for i := range replicas {
 			replicaIP, err := ipCalc.ReplicaIP(i)
 			if err != nil {
-				// Hallazgo #6: wrapping con contexto de fase y ordinal.
+				// Wrap with the phase and ordinal for context.
 				return nil, nil, fmt.Errorf("envoy upstreams: replica %d ip: %w", i, err)
 			}
 			listener.Upstreams = append(listener.Upstreams, render.EnvoyUpstreamServer{
@@ -459,7 +459,7 @@ func resolveTarget(def v1alpha1.PortBindingDefinition, resolver TargetResolver) 
 		}
 		return ip, def.Target.Service.Port, nil
 	}
-	// Hallazgo #5: validar Address y Port en el branch directo.
+	// Validate the address and port in the direct-target branch.
 	if def.Target.Address == "" {
 		return "", 0, fmt.Errorf("binding %s: target address is empty", def.Name)
 	}

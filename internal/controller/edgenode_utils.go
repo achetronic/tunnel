@@ -188,18 +188,31 @@ func (r *EdgeNodeReconciler) resolveUplinkPublicKeys(keysSecret *corev1.Secret, 
 	return uplinkKeys, nil
 }
 
-// collectBindings lists all PortBindings and returns those that target the named
-// EdgeNode via their spec.edgeNodeRef.
-func (r *EdgeNodeReconciler) collectBindings(ctx context.Context, nodeName string) ([]v1alpha1.PortBinding, error) {
+// collectBindings lists all PortBindings and returns those that target the given
+// EdgeNode via their spec.edgeNodeRef. The match is namespace-aware: a binding
+// belongs to this node only when both the referenced name AND the resolved
+// reference namespace equal the node's. EdgeNodeRef.Namespace defaults to the
+// PortBinding's own namespace when empty, mirroring triggerEdgeNode and
+// mapSecretToEdgeNodes, so two EdgeNodes that merely share a name in different
+// namespaces never aggregate each other's bindings.
+func (r *EdgeNodeReconciler) collectBindings(ctx context.Context, node *v1alpha1.EdgeNode) ([]v1alpha1.PortBinding, error) {
 	var pbList v1alpha1.PortBindingList
 	if err := r.List(ctx, &pbList); err != nil {
 		return nil, err
 	}
 	var bindings []v1alpha1.PortBinding
 	for _, pb := range pbList.Items {
-		if pb.Spec.EdgeNodeRef.Name == nodeName {
-			bindings = append(bindings, pb)
+		if pb.Spec.EdgeNodeRef.Name != node.Name {
+			continue
 		}
+		refNS := pb.Spec.EdgeNodeRef.Namespace
+		if refNS == "" {
+			refNS = pb.Namespace
+		}
+		if refNS != node.Namespace {
+			continue
+		}
+		bindings = append(bindings, pb)
 	}
 	return bindings, nil
 }

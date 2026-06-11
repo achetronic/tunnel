@@ -5,8 +5,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/achetronic/tunnel/internal/planner"
 	"github.com/achetronic/tunnel/internal/sshexec"
 )
+
+// unameX8664 is the canned `uname -m` output the provision test fakes report.
+const unameX8664 = "x86_64\n"
 
 // tlsTestFiles is the TLS material used across the provision TLS tests.
 func tlsTestFiles() []TLSFile {
@@ -74,6 +78,62 @@ func TestApplyTLSFiles_Idempotent(t *testing.T) {
 	}
 	if len(fake.Runs) != 0 {
 		t.Fatalf("expected no commands on a no-op apply, got %v", fake.Runs)
+	}
+}
+
+// TestEnroll_TLSRotationRestartsEnvoy verifies that when only the TLS material
+// changes (the binding shape, and therefore the LDS/CDS, stays the same) Enroll
+// forces an Envoy restart so the rotated certificate is actually picked up.
+// File-based tls_certificate references are only re-read on a (re)load, so
+// without this a rotated cert would be written to disk but never served.
+func TestEnroll_TLSRotationRestartsEnvoy(t *testing.T) {
+	fake := sshexec.NewFakeExecutor()
+
+	// State already in place for everything except the TLS material: relay,
+	// LDS and CDS hashes match the plan, only tlsHash differs (a rotation).
+	fake.Files["/etc/tunnel-operator/state.json"] = []byte(
+		`{"relayDocumentHash":"r","tunnelctlHash":"","envoyLdsHash":"l","envoyCdsHash":"c","tlsHash":"old"}`)
+
+	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
+			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "uname -m"):
+			return unameX8664, nil
+		case strings.Contains(cmd, "tunnelctl status"):
+			return relayStatusJSON, nil
+		case strings.Contains(cmd, "systemctl is-active"):
+			return activeServiceLine, nil
+		default:
+			return "", nil
+		}
+	}
+
+	plan := &planner.Plan{
+		RelayDocument:     []byte(`{"version":1}`),
+		EnvoyLDS:          []byte("lds"),
+		EnvoyCDS:          []byte("cds"),
+		RelayDocumentHash: "r",
+		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyLDSHash:      "l",
+		EnvoyCDSHash:      "c",
+	}
+
+	tlsApplied, err := Enroll(context.Background(), fake, plan, tlsTestFiles())
+	if err != nil {
+		t.Fatalf("enroll failed: %v", err)
+	}
+	if !tlsApplied {
+		t.Fatal("expected tlsApplied to be true on a rotation")
+	}
+
+	joined := strings.Join(fake.Runs, "\n")
+	if !strings.Contains(joined, "systemctl restart envoy") {
+		t.Fatalf("expected an envoy restart to pick up the rotated cert; runs:\n%s", joined)
+	}
+	// The LDS/CDS were unchanged, so no discovery file should have been moved.
+	if strings.Contains(joined, "mv /etc/envoy/lds.yaml.tmp") || strings.Contains(joined, "mv /etc/envoy/cds.yaml.tmp") {
+		t.Fatalf("LDS/CDS should not have been rewritten on a cert-only rotation; runs:\n%s", joined)
 	}
 }
 
