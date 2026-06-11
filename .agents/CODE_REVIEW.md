@@ -1,142 +1,35 @@
-# Code Review (hardening pass)
+# Code Review (hardening pass) — outstanding items
 
-Full read-through of the Go codebase following call chains across packages to
-separate real defects from things that only look suspicious. Scope: every
-production file under `internal/`, `cmd/` and `api/v1alpha1/`. Branch:
-`code-review-hardening`.
+Full read-through of the Go codebase (every production file under `internal/`,
+`cmd/` and `api/v1alpha1/`), following call chains across packages to separate
+real defects from things that only look suspicious.
 
-Severity legend:
-- **CRITICAL** — real defect affecting correctness, reliability or security.
-- **ROBUSTNESS** — genuine but lower-impact fragility.
-- **NOTE** — worth knowing; left untouched on purpose (cosmetic or design call).
-- **DISMISSED** — looked wrong at first, verified fine in context.
+The defects found were fixed and committed on branch `code-review-hardening`
+(see `git log` for the details and rationale of each): edge TLS now rotates via
+file-based SDS with zero downtime, PortBinding aggregation is namespace-scoped,
+orphaned TLS material is pruned from the edge, and the stray non-English
+comments were cleaned up. This document now tracks only what is **not** done:
+low-priority notes left untouched on purpose, and findings that were dismissed
+after verification (kept for context so they are not re-investigated).
 
-Verdict: the codebase is in good shape. Error handling is disciplined (no
-`_ = err` in production code), SSH host-key verification is correct, IPAM bounds
-and the agentconfig validators are solid, renders are deterministic (slices
-sorted before hashing), and timeouts/contexts bound every remote command. Two
-real defects were found and fixed; the rest are notes or dismissals.
-
----
-
-## Fixed
-
-### F1 — TLS certificate rotation was never picked up by Envoy (CRITICAL)
-**Files:** `internal/provision/enroll.go` (`Enroll`, `applyEnvoyConfig`,
-`ensureEnvoyRunning`), `internal/render/envoy.go:73-100`.
-
-**What.** Edge TLS (`offload`/`mutual`) renders the listener with the cert/key
-referenced by **filename** in the `DownstreamTlsContext`
-(`certificate_chain.filename`, `private_key.filename`). Envoy reads those files
-**only when the listener is (re)loaded**, not when the file content changes
-underneath it (verified against the Envoy docs: file-based `tls_certificate`
-needs SDS + `watched_directory` or a hot restart to refresh; a plain `filename`
-is read once at load).
-
-**Call-chain evidence.** On a cert-manager rotation: the Secret changes →
-`mapSecretToEdgeNodes` enqueues the EdgeNode → `handleReconciliation` →
-`planner.BuildPlan`. The rendered LDS/CDS depend only on the cert **paths**,
-which do not change on rotation, so `EnvoyLDSHash`/`EnvoyCDSHash` are identical.
-In `Enroll`, `applyTLSFiles` writes the new cert (and reports `tlsApplied=true`),
-but `applyEnvoyConfig` sees unchanged hashes and skips the `mv` that would
-retrigger Envoy's inotify reload, and `ensureEnvoyRunning` sees the service
-already `active` and does **not** restart it. Net result: the new certificate
-sits on disk while Envoy keeps serving the old one until it expires — a silent
-outage of the TLS listener. The architecture doc claims rotation hot-reloads
-automatically; it did not.
-
-**Fix (shipped: file-based SDS, zero-downtime).** Certificates are no longer
-referenced by inline `filename`. The render now emits
-`tls_certificate_sds_secret_configs` (and, for `mutual`,
-`validation_context_sds_secret_config`) sourced from a per-binding SDS document
-`/etc/envoy/tls/<binding>.sds.yaml` with `watched_directory: /etc/envoy/tls`.
-The controller (`collectTLSFiles`) reads the Secret and renders that SDS document
-with the cert/key (and CA for mutual) embedded **inline** via a new pure
-`render.RenderEnvoySDS`. `Enroll` writes it with the existing temp + `chmod 600`
-+ atomic `mv` into the watched directory. Per the Envoy v1.29.3 docs, a move into
-a `watched_directory` reloads the secret **gracefully — no listener rebuild, no
-dropped connections, no restart**. Inlining cert+key in one file makes the swap
-atomic, so a rotation never exposes a half-updated pair. The earlier interim fix
-(restart Envoy on rotation) was therefore removed; `applyEnvoyConfig` /
-`ensureEnvoyRunning` are back to their original signatures. Regression tests:
-`render.TestRenderEnvoySDS`, `provision.TestEnroll_TLSRotationReloadsViaSDS`
-(asserts the SDS file is swapped atomically and Envoy is *not* restarted), and
-the updated render golden files for the offload/mutual listener shapes.
-
-**Why this is the right end state.** It is the Envoy-native rotation mechanism
-(file-based SDS), keeps the existing file-based-xDS design (no gRPC control
-plane), and delivers the zero-downtime rotation the architecture promised. The
-LDS/CDS stay independent of cert content, so a rotation produces no LDS churn.
-
-### F2 — `collectBindings` ignored the namespace (CRITICAL/correctness)
-**File:** `internal/controller/edgenode_utils.go` (`collectBindings`), caller
-`internal/controller/edgenode_sync.go:295`.
-
-**What.** During EdgeNode reconciliation the aggregate plan is built from every
-PortBinding whose `spec.edgeNodeRef.Name` matched — **by name only**, ignoring
-the namespace entirely.
-
-**Call-chain evidence.** The rest of the controller is namespace-aware and
-treats `EdgeNodeRef.Namespace` (defaulting to the PortBinding's own namespace)
-as part of the identity: `triggerEdgeNode` (portbinding_sync.go:48-51) and
-`mapSecretToEdgeNodes` (edgenode_utils.go:444-451) both resolve and enqueue the
-EdgeNode using that namespace. But `collectBindings` did not, so two EdgeNodes
-that merely share a name in different namespaces would aggregate each other's
-bindings: PortBindings (and their exposed ports + targets) from namespace A
-would be rendered onto the VPS of the same-named EdgeNode in namespace B. In a
-single-namespace deployment this never bites, but it is a real multi-tenant
-correctness/isolation bug and an internal inconsistency.
-
-**Fix.** `collectBindings` now takes the `*EdgeNode` and matches on both the
-referenced name AND the resolved reference namespace
-(`EdgeNodeRef.Namespace` or, when empty, the PortBinding's namespace) against
-the node's namespace, mirroring the rest of the controller. Regression test:
-`collectBindings namespace isolation`.
-
-### F3 — Spanish leftover comments violated the English-only rule (cleanup)
-**File:** `internal/planner/plan.go` (several `// Hallazgo #N: ...` comments).
-
-These were stale Spanish review annotations referencing a defunct numbering.
-They violate DESIGN_AND_RULES §5 ("English Only"). Rewritten to equivalent
-English comments. No logic change. (Done because it is an explicit project rule
-and trivial; purely cosmetic English/Spanish drift elsewhere was left alone.)
-
-### F4 — Prune orphaned TLS material from the edge (ROBUSTNESS/hygiene, was N1)
-**File:** `internal/provision/enroll.go` (`applyTLSFiles`, new `pruneTLSFiles`).
-
-**What.** `applyTLSFiles` wrote/refreshed the per-binding SDS documents but never
-removed files for bindings that had been deleted; only full `Teardown` wiped
-`/etc/envoy`. A removed TLS binding therefore left its private key (inline in the
-orphaned `*.sds.yaml`) on the edge until the node was torn down.
-
-**Fix.** After writing the desired set, `applyTLSFiles` now prunes
-`/etc/envoy/tls`: it lists the directory and removes any TLS-material file not in
-the desired set. It also cleans up pre-SDS `*.crt`/`*.key` files left by the old
-layout, so an in-place upgrade does not strand key material. Deletions are
-restricted to names matching a conservative allowlist regex
-(`^[A-Za-z0-9._-]+\.(sds\.yaml|crt|key)$`), so an unexpected file is never
-removed and no shell metacharacter from a name can reach the remote command. The
-prune is gated by the same TLS hash that gates the writes, so it adds no work to
-steady-state reconciles (the Enroll short-circuit returns earlier when nothing
-changed). Regression tests: `TestApplyTLSFiles_PrunesOrphans`,
-`TestApplyTLSFiles_PrunesAllWhenEmpty`.
+General verdict stands: the codebase is in good shape. Error handling is
+disciplined (no `_ = err` in production code), SSH host-key verification is
+correct, IPAM bounds and the agentconfig validators are solid, renders are
+deterministic (slices sorted before hashing), and timeouts/contexts bound every
+remote command.
 
 ---
 
-## Notes (intentionally not changed)
+## Outstanding notes (intentionally not changed)
 
-### N1 — Orphaned TLS material after a binding is removed — RESOLVED
-Resolved in F4 (`applyTLSFiles` now prunes stale SDS documents and pre-SDS
-cert/key files from `/etc/envoy/tls`). Kept here as a pointer; see F4.
-
-### N2 — `agentrun.Run` does not observe its `ctx` for shutdown (NOTE)
+### N1 — `agentrun.Run` does not observe its `ctx` for shutdown
 `Run(ctx, ...)` starts `watchConfig` and `srv.ListenAndServe()` but never uses
 `ctx` to stop the HTTP server or the watcher; it returns only on a server error.
 For the uplink daemon this is harmless (the container is killed on SIGTERM and
 the process exits), so it is a graceful-shutdown nicety, not a leak that matters
 in practice. Left as-is.
 
-### N3 — Direct-address target requires a port only at runtime (NOTE)
+### N2 — Direct-address target requires a port only at runtime
 CEL on PortBinding enforces "exactly one of service/address" but does not require
 `target.port` when `address` is used (the field is an optional non-pointer int,
 so an omitted value serializes as absent and dodges the `Minimum=1` marker).
@@ -144,7 +37,7 @@ so an omitted value serializes as absent and dodges the `Minimum=1` marker).
 (`PlanBuildFailed`), so it is defense-in-depth rather than a hole. Acceptable;
 could be tightened with a CEL rule if desired.
 
-### N4 — `installEnvoyBinary` downloads without checksum verification (NOTE)
+### N3 — `installEnvoyBinary` downloads without checksum verification
 The Envoy binary is fetched over HTTPS from the official GitHub releases with no
 post-download SHA verification. The transport is TLS and the design explicitly
 chose direct download, so this is consistent with the stated approach; adding a
@@ -189,13 +82,3 @@ pinned checksum per version would be a hardening improvement but is out of scope
   PortBinding correctly enforce: TCP/UDP param coherence, exactly one of
   service/address, TLS only on TCP, and `secretRef` required for
   offload/mutual. They match ARCHITECTURE §3.2.
-
----
-
-## Validation
-- `go build ./...` — clean.
-- `go vet ./...` — clean.
-- `gofmt -l internal/` — clean.
-- `golangci-lint run` on changed packages — 0 issues.
-- Full unit + envtest suite (`go test $(go list ./... | grep -v /e2e)`) — green,
-  including the two new regression tests.
