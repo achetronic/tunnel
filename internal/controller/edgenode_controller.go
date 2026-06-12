@@ -169,9 +169,9 @@ func (r *EdgeNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 // tlsSecretShaped passes only Secrets that can plausibly be referenced by a
 // PortBinding TLS SecretRef: the kubernetes.io/tls type or anything carrying a
-// tls.crt key (cert-manager and hand-made certs alike). Every other Secret in
-// the cluster (tokens, registry creds, helm releases) previously funneled
-// through mapSecretToEdgeNodes and triggered a PortBinding List per change.
+// tls.crt key (cert-manager and hand-made certs alike). Without it, every
+// Secret in the cluster (tokens, registry creds, helm releases) funnels
+// through mapSecretToEdgeNodes and costs a PortBinding List per change.
 // Note this trims reconcile churn, not manager memory: the informer cache
 // still holds all Secrets because the reconciler reads SSH and uplink-key
 // Secrets (Opaque) through the same cached client, so a cache-level selector

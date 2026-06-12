@@ -58,11 +58,10 @@ func BuildKeysSecret(node *v1alpha1.EdgeNode, keys map[int32]string) *corev1.Sec
 // longer passed as environment: they live in the desired-state document mounted
 // from the ConfigMap, which each replica completes with its own identity.
 // BuildHeadlessService renders the headless Service the uplink StatefulSet's
-// spec.serviceName points at. A StatefulSet requires it for the per-pod DNS
-// identity contract; until now nobody created it, leaving the reference
-// dangling (pods still ran, but per-pod DNS never resolved). Same
-// name/namespace/labels as the StatefulSet, ClusterIP None, no ports: the
-// uplink exposes nothing in-cluster, the Service exists purely for identity.
+// spec.serviceName points at, satisfying the StatefulSet's per-pod DNS
+// identity contract. Same name/namespace/labels as the StatefulSet, ClusterIP
+// None, no ports: the uplink exposes nothing in-cluster, the Service exists
+// purely for identity.
 func BuildHeadlessService(node *v1alpha1.EdgeNode) *corev1.Service {
 	labels := LabelsForNode(node)
 	return &corev1.Service{

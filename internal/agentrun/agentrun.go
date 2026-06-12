@@ -114,10 +114,11 @@ func Run(ctx context.Context, load Loader, watchPath, healthAddr string) error {
 		return err
 	}
 	if err := st.apply(doc); err != nil {
-		// A failed initial apply used to leave the daemon Running but
-		// NotReady forever (no CrashLoop to rescue it, nothing retrying
-		// until the config changed). Retry in the background with backoff
-		// until something applies successfully.
+		// Without a retry, a failed initial apply (e.g. a race with the
+		// WireGuard kernel module at startup) leaves the daemon Running
+		// but NotReady forever: nothing re-applies until the config
+		// changes and there is no CrashLoop to rescue it. Retry in the
+		// background until something applies successfully.
 		slog.Error("initial apply failed, retrying with backoff", "error", err)
 		go retryInitialApply(st, load, time.Sleep)
 	} else {
