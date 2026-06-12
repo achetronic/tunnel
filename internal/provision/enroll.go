@@ -186,6 +186,13 @@ func installTunnelctl(ctx context.Context, exec sshexec.Executor, bin []byte, ha
 	return nil
 }
 
+// envoyVersionPattern constrains the Envoy release string interpolated into
+// root shell commands on the VPS (the download URL and the version probe). The
+// value is operator-controlled (--envoy-version flag), but a typo must fail
+// validation, not become a root RCE. Bare semver only, no leading "v": the
+// download URL template already prefixes it.
+var envoyVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
 // installEnvoyBinary installs the requested Envoy release on the VPS, matching
 // the host architecture. The download URL is built from version and the arch
 // suffix rather than hardcoded. The install is version-aware: it (re)downloads
@@ -193,6 +200,9 @@ func installTunnelctl(ctx context.Context, exec sshexec.Executor, bin []byte, ha
 // changing EnvoyVersion on the EdgeNode actually replaces the binary (a running
 // envoy still needs its service restart, handled by ensureEnvoyRunning).
 func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version string) (replaced bool, err error) {
+	if !envoyVersionPattern.MatchString(version) {
+		return false, fmt.Errorf("invalid envoy version %q: must match %s", version, envoyVersionPattern)
+	}
 	archOut, err := exec.Run(ctx, "uname -m")
 	if err != nil {
 		return false, fmt.Errorf("failed to detect architecture: %w", err)

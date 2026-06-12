@@ -69,10 +69,8 @@ This document tracks pending architectural improvements and technical debt.
 ## 15. [MEDIUM] ~~Initial `Apply` in `agentrun` has no retry~~ ✅ DONE (jun 2026)
 - **Fixed:** a failed initial apply now spawns a background retry loop with exponential backoff (1s floor, 60s cap) that reloads the document on each attempt (so a config fix is picked up) and stops as soon as ANY apply succeeds, including one performed by the config watcher. Apply calls from the retry loop and the watcher are serialized through a shared `applyState` (mutex + success flag). Mutation-tested: removing the success short-circuit and freezing the backoff both fail the suite.
 
-## 16. [MEDIUM] `EnvoyVersion` interpolated into VPS shell without sanitisation
-- **Context:** The value ends up inside shell commands run as root on the VPS. The vector is operator-controlled (a flag), but a typo should not be a root RCE.
-- **Task:** Validate it against a strict version regex (e.g. `^v?[0-9]+\.[0-9]+\.[0-9]+$`) before any interpolation, or shell-quote it.
-- **When:** Soon; trivial guard.
+## 16. [MEDIUM] ~~`EnvoyVersion` interpolated into VPS shell without sanitisation~~ ✅ DONE (jun 2026)
+- **Fixed:** `installEnvoyBinary` rejects any version that is not bare semver (`^[0-9]+\.[0-9]+\.[0-9]+$`) before any remote command runs (mutation-tested: gutting the guard fails the suite; injection payloads never reach the FakeExecutor). The controller's `DefaultEnvoyVersion` fallback keeps production plans always valid; the Enroll test plans gained the explicit version they implicitly relied on.
 
 ## 17. [MEDIUM] PortBinding `Ready=True` means "triggered", not "applied"
 - **Context:** The condition is set when the label is written, not when the port is actually applied on the edge. GitOps tooling (Argo/Flux) will read it as "operational".

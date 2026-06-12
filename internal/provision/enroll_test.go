@@ -94,6 +94,7 @@ func TestEnroll_Idempotent(t *testing.T) {
 		EnvoyCDS:          []byte("cds"),
 		RelayDocumentHash: "hash1",
 		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
 		EnvoyLDSHash:      "hash2",
 		EnvoyCDSHash:      "hash3",
 		RelayIP:           "10.200.0.1",
@@ -175,6 +176,7 @@ func TestEnroll_PartialFail(t *testing.T) {
 		EnvoyCDS:          []byte("bad-cds"),
 		RelayDocumentHash: "relayhash",
 		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
 		EnvoyLDSHash:      "hash2",
 		EnvoyCDSHash:      "hash3",
 		RelayIP:           "10.200.0.1",
@@ -217,6 +219,7 @@ func TestEnroll_TransportErrorIsFatal(t *testing.T) {
 		EnvoyCDS:          []byte("cds"),
 		RelayDocumentHash: "hash1",
 		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
 		EnvoyLDSHash:      "hash2",
 		EnvoyCDSHash:      "hash3",
 		RelayIP:           "10.200.0.1",
@@ -288,6 +291,7 @@ func TestEnroll_BootstrapCustomIP(t *testing.T) {
 		EnvoyCDS:          []byte("cds"),
 		RelayDocumentHash: "hash1",
 		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
 		EnvoyLDSHash:      "hash2",
 		EnvoyCDSHash:      "hash3",
 		RelayIP:           "10.77.0.1",
@@ -347,6 +351,7 @@ func TestEnroll_BootstrapDiffRestartsEnvoy(t *testing.T) {
 		EnvoyCDS:          []byte("cds"),
 		RelayDocumentHash: "hash1",
 		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
 		EnvoyLDSHash:      "hash2",
 		EnvoyCDSHash:      "hash3",
 		RelayIP:           "10.77.0.1",
@@ -469,6 +474,7 @@ func TestEnroll_EmptyRelayIPFails(t *testing.T) {
 		EnvoyCDS:          []byte("cds"),
 		RelayDocumentHash: "hash1",
 		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
 		EnvoyLDSHash:      "hash2",
 		EnvoyCDSHash:      "hash3",
 		RelayIP:           "", // Intentionally empty
@@ -716,5 +722,48 @@ func TestEnroll_BackfillEnvoyVersion_NoDownloadNoRestart_PersistsVersion(t *test
 	stateStr := string(stateBytes)
 	if !strings.Contains(stateStr, `"envoyVersion":"1.30.1"`) {
 		t.Errorf("expected state.json to persist EnvoyVersion '1.30.1', got: %s", stateStr)
+	}
+}
+
+// installEnvoyBinary interpolates the version into root shell commands on the
+// VPS, so it must reject anything that is not bare semver before any command
+// runs: a typo'd --envoy-version must fail validation, not become a root RCE.
+func TestInstallEnvoyBinary_RejectsUnsafeVersion(t *testing.T) {
+	for _, version := range []string{
+		"1.29.3; rm -rf /",
+		"$(reboot)",
+		"`id`",
+		"1.29",
+		"v1.29.3",
+		"1.29.3 ",
+		"",
+	} {
+		t.Run(version, func(t *testing.T) {
+			fake := sshexec.NewFakeExecutor()
+			if _, err := installEnvoyBinary(context.Background(), fake, version); err == nil {
+				t.Fatalf("version %q: expected a validation error, got nil", version)
+			}
+			if len(fake.Runs) != 0 {
+				t.Errorf("version %q: no command must reach the VPS, ran %v", version, fake.Runs)
+			}
+		})
+	}
+}
+
+// A well-formed version passes validation and proceeds to the architecture
+// probe (the first remote command).
+func TestInstallEnvoyBinary_AcceptsSemver(t *testing.T) {
+	fake := sshexec.NewFakeExecutor()
+	fake.RunFunc = func(_ context.Context, cmd string) (string, error) {
+		if cmd == "uname -m" {
+			return unameX8664, nil
+		}
+		return testEnvoyVersion1301, nil
+	}
+	if _, err := installEnvoyBinary(context.Background(), fake, "1.30.1"); err != nil {
+		t.Fatalf("expected semver to pass validation, got: %v", err)
+	}
+	if len(fake.Runs) == 0 || fake.Runs[0] != "uname -m" {
+		t.Errorf("expected the arch probe to run first, got %v", fake.Runs)
 	}
 }
