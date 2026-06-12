@@ -65,8 +65,15 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 
 	tlsHash := hashTLSFiles(tlsFiles)
 
+	bin, tunnelctlHash, err := resolveTunnelctlBinary(ctx, exec, plan.TunnelctlDir)
+	if err != nil {
+		return false, err
+	}
+
 	if stateErr == nil &&
 		state.RelayDocumentHash == plan.RelayDocumentHash &&
+		state.TunnelctlHash == tunnelctlHash &&
+		state.EnvoyVersion == plan.EnvoyVersion &&
 		state.EnvoyLDSHash == plan.EnvoyLDSHash &&
 		state.EnvoyCDSHash == plan.EnvoyCDSHash &&
 		state.TLSHash == tlsHash &&
@@ -76,11 +83,18 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 		return false, nil
 	}
 
-	if err := installTunnelctl(ctx, exec, plan.TunnelctlDir, state); err != nil {
+	if err := installTunnelctl(ctx, exec, bin, tunnelctlHash, state); err != nil {
 		return false, err
 	}
-	if err := installEnvoyBinary(ctx, exec, plan.EnvoyVersion); err != nil {
+	replaced, err := installEnvoyBinary(ctx, exec, plan.EnvoyVersion)
+	if err != nil {
 		return false, err
+	}
+	if replaced || state.EnvoyVersion != plan.EnvoyVersion {
+		state.EnvoyVersion = plan.EnvoyVersion
+		if err := writeState(ctx, exec, state); err != nil {
+			return false, fmt.Errorf("failed to persist envoy version state: %w", err)
+		}
 	}
 	if err := writeEnvoyService(ctx, exec); err != nil {
 		return false, err
@@ -105,20 +119,23 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 	if err := ensureEnvoyRunning(ctx, exec, plan); err != nil {
 		return false, err
 	}
+	if replaced {
+		// Restart Envoy to pick up the newly installed binary since a live
+		// systemd service does not automatically reload its binary on disk.
+		// One redundant restart on a first enrollment is acceptable and harmless.
+		if err := RestartEnvoy(ctx, exec); err != nil {
+			return false, err
+		}
+	}
 	return tlsApplied, nil
 }
 
-// installTunnelctl pushes the static tunnelctl binary matching the host
-// architecture to the VPS. The binary is read from the local tunnelctlDir (baked
-// into the operator image, or a local build dir under `make run`), so nothing is
-// downloaded on the VPS and the VPS needs no internet access for it. The install
-// is idempotent: it skips the push only when the persisted state records the same
-// binary hash AND the binary is actually present (so a rebuilt VPS still gets it).
-// On a successful push it persists the new hash so subsequent reconciles are no-ops.
-func installTunnelctl(ctx context.Context, exec sshexec.Executor, tunnelctlDir string, state *State) error {
+// resolveTunnelctlBinary detects the architecture of the VPS, reads the corresponding
+// tunnelctl binary from the local tunnelctlDir, and computes its SHA-256 hash.
+func resolveTunnelctlBinary(ctx context.Context, exec sshexec.Executor, tunnelctlDir string) (bin []byte, hash string, err error) {
 	archOut, err := exec.Run(ctx, "uname -m")
 	if err != nil {
-		return fmt.Errorf("failed to detect architecture: %w", err)
+		return nil, "", fmt.Errorf("failed to detect architecture: %w", err)
 	}
 	var arch string
 	switch strings.TrimSpace(archOut) {
@@ -127,16 +144,24 @@ func installTunnelctl(ctx context.Context, exec sshexec.Executor, tunnelctlDir s
 	case "aarch64", archARM64:
 		arch = archARM64
 	default:
-		return fmt.Errorf("unsupported architecture for tunnelctl: %s", strings.TrimSpace(archOut))
+		return nil, "", fmt.Errorf("unsupported architecture for tunnelctl: %s", strings.TrimSpace(archOut))
 	}
 
 	localPath := filepath.Join(tunnelctlDir, "tunnelctl-linux-"+arch)
-	bin, err := os.ReadFile(localPath)
+	bin, err = os.ReadFile(localPath)
 	if err != nil {
-		return fmt.Errorf("read tunnelctl binary %q: %w", localPath, err)
+		return nil, "", fmt.Errorf("read tunnelctl binary %q: %w", localPath, err)
 	}
-	hash := fmt.Sprintf("%x", sha256.Sum256(bin))
+	hash = fmt.Sprintf("%x", sha256.Sum256(bin))
+	return bin, hash, nil
+}
 
+// installTunnelctl pushes the static tunnelctl binary matching the host
+// architecture to the VPS. The binary and its hash are resolved beforehand.
+// The install is idempotent: it skips the push only when the persisted state records the same
+// binary hash AND the binary is actually present (so a rebuilt VPS still gets it).
+// On a successful push it persists the new hash so subsequent reconciles are no-ops.
+func installTunnelctl(ctx context.Context, exec sshexec.Executor, bin []byte, hash string, state *State) error {
 	if state.TunnelctlHash == hash {
 		if _, err := exec.Run(ctx, "test -x "+tunnelctlBinPath); err == nil {
 			return nil
@@ -145,7 +170,7 @@ func installTunnelctl(ctx context.Context, exec sshexec.Executor, tunnelctlDir s
 		}
 	}
 
-	slog.Info("enroll: pushing tunnelctl binary", "arch", arch, "source", localPath)
+	slog.Info("enroll: pushing tunnelctl binary", "hash", hash)
 	tmp := tunnelctlBinPath + ".tmp"
 	if err := exec.Put(ctx, tmp, bin); err != nil {
 		return fmt.Errorf("failed to push tunnelctl binary: %w", err)
@@ -167,10 +192,10 @@ func installTunnelctl(ctx context.Context, exec sshexec.Executor, tunnelctlDir s
 // only when no envoy is present or the installed one is a different version, so
 // changing EnvoyVersion on the EdgeNode actually replaces the binary (a running
 // envoy still needs its service restart, handled by ensureEnvoyRunning).
-func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version string) error {
+func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version string) (replaced bool, err error) {
 	archOut, err := exec.Run(ctx, "uname -m")
 	if err != nil {
-		return fmt.Errorf("failed to detect architecture: %w", err)
+		return false, fmt.Errorf("failed to detect architecture: %w", err)
 	}
 	arch := strings.TrimSpace(archOut)
 
@@ -181,7 +206,7 @@ func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version stri
 	case "aarch64", "arm64":
 		archSuffix = "aarch_64"
 	default:
-		return fmt.Errorf("unsupported architecture for Envoy: %s", arch)
+		return false, fmt.Errorf("unsupported architecture for Envoy: %s", arch)
 	}
 
 	downloadURL := fmt.Sprintf(
@@ -191,15 +216,25 @@ func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version stri
 
 	// Reinstall when envoy is absent or reports a different version. Envoy's
 	// --version output embeds the release as "/<version>/".
-	installCmd := fmt.Sprintf(
-		"envoy --version 2>/dev/null | grep -q '/%s/' || (curl -sL %s -o /tmp/envoy && chmod +x /tmp/envoy && mv /tmp/envoy /usr/local/bin/envoy)",
-		version, downloadURL,
-	)
-	slog.Info("enroll: ensuring envoy binary (downloads on first run or version change)", "arch", arch, "version", version)
-	if _, err := exec.Run(ctx, installCmd); err != nil {
-		return fmt.Errorf("failed to install envoy binary: %w", err)
+	probeOut, probeErr := exec.Run(ctx, "envoy --version 2>/dev/null")
+	if probeErr != nil && !isExitError(probeErr) {
+		return false, fmt.Errorf("failed to probe envoy version: %w", probeErr)
 	}
-	return nil
+
+	if probeErr == nil && strings.Contains(probeOut, fmt.Sprintf("/%s/", version)) {
+		return false, nil
+	}
+
+	downloadCmd := fmt.Sprintf(
+		"curl -sL %s -o /tmp/envoy && chmod +x /tmp/envoy && mv /tmp/envoy /usr/local/bin/envoy",
+		downloadURL,
+	)
+
+	slog.Info("enroll: ensuring envoy binary (downloads on first run or version change)", "arch", arch, "version", version)
+	if _, err := exec.Run(ctx, downloadCmd); err != nil {
+		return false, fmt.Errorf("failed to install envoy binary: %w", err)
+	}
+	return true, nil
 }
 
 // writeEnvoyService installs the Envoy systemd unit and reloads systemd so it

@@ -14,6 +14,9 @@ type State struct {
 	// VPS. It lets Enroll re-push the binary only when it actually changes (a new
 	// operator build), avoiding a redundant SSH copy on every reconcile.
 	TunnelctlHash string `json:"tunnelctlHash"`
+	// EnvoyVersion records the Envoy release last installed by enroll. Pre-existing
+	// VPSes have it empty, which simply forces one full (idempotent) pass that backfills it.
+	EnvoyVersion string `json:"envoyVersion"`
 	// EnvoyLDSHash is the hash of the last applied Envoy LDS config.
 	EnvoyLDSHash string `json:"envoyLdsHash"`
 	// EnvoyCDSHash is the hash of the last applied Envoy CDS config.
