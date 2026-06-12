@@ -43,3 +43,62 @@ This document tracks pending architectural improvements and technical debt.
 - **Context:** `agentrun.Run(ctx, ...)` takes a context but never observes it: it starts `watchConfig` and `srv.ListenAndServe()` and only returns on a server error. The `ctx` parameter is silently ignored, so the daemon relies on the container being SIGKILL'd. Harmless in the uplink pod today, but a function that accepts a `ctx` and drops it is a smell and blocks any clean in-process shutdown/testing.
 - **Task:** Wire `ctx` through: stop the fsnotify watcher and call `srv.Shutdown(ctx)` when `ctx` is done (run `ListenAndServe` in a goroutine, select on `ctx.Done()`), and treat `http.ErrServerClosed` as a clean exit. Have `tunnelctl run` pass a signal-bound context instead of `context.Background()`.
 - **When:** Low priority (no production impact), but cheap and removes the dropped-parameter smell.
+
+---
+
+*Items 9–18 come from the June 2026 robustness audit (3 workers + manual confirmation against the code; `make verify` green incl. race). Severity noted per item. These are the agreed working set.*
+
+## 9. [HIGH] ~~EdgeNode reconcile hot loop: status update re-queues itself~~ ✅ DONE (jun 2026)
+- **Fixed:** `For()` now carries `predicate.Or(GenerationChangedPredicate, AnnotationChangedPredicate, LabelChangedPredicate)` (`edgeNodeEventPredicate`), and `updateStatusAndReturn` skips the `Status().Update()` when the status is semantically DeepEqual to the snapshot taken after the Get. Regression tests: a status-write-counting client wrapper proves the second reconcile performs zero status writes (mutation-tested: fails with the skip disabled), plus direct predicate assertions (status-only → no enqueue; generation/annotation/label change → enqueue).
+
+## 10. [HIGH] Envoy admin address hardcoded to `10.200.0.1` in the bootstrap
+- **Context:** `enroll.go:324` — the bootstrap YAML carries that literal IP. With a non-default `spec.tunnel.network`, Envoy tries to bind an address that does not exist on the host, fails, `waitEnvoyActive` detects it, and the enroll fails *forever* for that network.
+- **Task:** The relay IP is already computed in the planner; pass it through to the bootstrap template instead of the literal.
+- **When:** Now. Blocks any non-default tunnel network.
+
+## 11. [HIGH] known_hosts verification ignores the hostname
+- **Context:** `ssh_utils.go:31-56` — the `hosts[]` returned by `ParseKnownHosts` are discarded, so the host-key callback accepts any key present in the file for any host. With a single VPS it is barely exploitable, but the anti-MitM semantics are broken as soon as the Secret holds more than one entry.
+- **Task:** Replace the manual parsing/callback with `golang.org/x/crypto/ssh/knownhosts.New`, which does hostname-aware matching correctly.
+- **When:** Now. Security semantics, small diff.
+
+## 12. [MEDIUM] Enroll early-exit misses `TunnelctlHash` and `EnvoyVersion` (silently ineffective upgrades)
+- **Context:** `enroll.go:67` — the early-exit comparison only covers the plan hash. Upgrading the `tunnelctl` binary or `--envoy-version` without a plan change leaves the VPS running the old artifacts indefinitely, with no observable signal. Two faces of the same bug.
+- **Task:** Include `TunnelctlHash` and `EnvoyVersion` in the early-exit decision (compare against what `state.json` recorded on the VPS).
+- **When:** With the HIGH batch; it is the same file as item 10.
+
+## 13. [MEDIUM] Orphaned kernel routes on uplink scale-down
+- **Context:** `wg.go` — `RouteReplace` installs routes for current peers but nothing ever calls `RouteDel` for removed peers. Traffic to a dead replica is silently dropped and `ip route` lies about the topology.
+- **Task:** Diff desired vs. installed routes during apply and delete the stale ones (same pattern as the peer reconciliation).
+- **When:** Soon; bites on any replica scale-down.
+
+## 14. [MEDIUM] `spec.uplink.namespace` is mutable and orphans resources on teardown
+- **Context:** If the namespace changes after resources were created, teardown looks in the new namespace, sees NotFound, removes the finalizer and leaves the STS + ConfigMap + Secrets orphaned in the old one.
+- **Task:** Add a CEL immutability rule (`self == oldSelf`) on `spec.uplink.namespace`.
+- **When:** Soon; one-line CRD validation (three-part CRD edit per DESIGN_AND_RULES §5).
+
+## 15. [MEDIUM] Initial `Apply` in `agentrun` has no retry
+- **Context:** If the first `Apply` fails (e.g. a race with the kernel module at startup), nothing retries until the ConfigMap changes. The pod stays `Running` but NotReady forever, with no CrashLoop to rescue it.
+- **Task:** Retry the initial apply with backoff (or exit non-zero on persistent failure so the kubelet restarts the container).
+- **When:** Soon; turns a transient race into a permanent outage today.
+
+## 16. [MEDIUM] `EnvoyVersion` interpolated into VPS shell without sanitisation
+- **Context:** The value ends up inside shell commands run as root on the VPS. The vector is operator-controlled (a flag), but a typo should not be a root RCE.
+- **Task:** Validate it against a strict version regex (e.g. `^v?[0-9]+\.[0-9]+\.[0-9]+$`) before any interpolation, or shell-quote it.
+- **When:** Soon; trivial guard.
+
+## 17. [MEDIUM] PortBinding `Ready=True` means "triggered", not "applied"
+- **Context:** The condition is set when the label is written, not when the port is actually applied on the edge. GitOps tooling (Argo/Flux) will read it as "operational".
+- **Task:** Only set `Ready=True` once the EdgeNode reconcile confirms the port is in the applied plan (or introduce a separate `Programmed`/`Ready` pair with honest semantics).
+- **When:** Soon; observability correctness.
+
+## 18. [MEDIUM] Grouped minor findings from the audit
+- **Context/Task:** Small, independent fixes confirmed in the audit:
+  - `mapSecretToEdgeNodes` swallows List errors without logging (a TLS/SSH secret rotation can be silently missed) — log the error.
+  - RBAC grants `create`/`delete` on the operator's own CRDs — trim to what the controller actually needs.
+  - The Secrets watch is cluster-wide and unfiltered — add a field/label selector or namespace scoping (manager memory on large clusters).
+  - ipam is anchored to the 4th octet — breaks with CIDRs that are not `.0`-aligned `/24`s; compute offsets properly over the CIDR.
+  - The planner does not reserve 8080/9901 as forbidden ports — a PortBinding can collide with the readiness endpoint / Envoy admin.
+  - The STS `ServiceName` points to a headless Service nobody creates — create it (or drop the reference).
+  - `--leader-elect` defaults to false — flip the default to true.
+- **When:** Batch them in one cleanup pass after items 9–17.
+

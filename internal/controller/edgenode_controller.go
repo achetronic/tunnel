@@ -25,14 +25,26 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	"github.com/achetronic/tunnel/api/v1alpha1"
 	"github.com/achetronic/tunnel/internal/provision"
 	"github.com/achetronic/tunnel/internal/sshexec"
+)
+
+// edgeNodeEventPredicate defines the predicate rules for filtering EdgeNode reconcile events.
+// Status-only updates must not re-enqueue to prevent reconciliation hot loops.
+// However, changes to spec (generation), labels, or annotations must trigger a reconcile.
+// Annotations must be watched because they carry the one-shot restart-envoy trigger.
+var edgeNodeEventPredicate = predicate.Or(
+	predicate.GenerationChangedPredicate{},
+	predicate.AnnotationChangedPredicate{},
+	predicate.LabelChangedPredicate{},
 )
 
 // EdgeNodeReconciler reconciles an EdgeNode object.
@@ -81,6 +93,8 @@ func (r *EdgeNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Get(ctx, req.NamespacedName, &node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	prevStatus := node.Status.DeepCopy()
 
 	skipDeprovision := node.Annotations[skipDeprovisionAnnotation] == annotationTrue
 
@@ -150,7 +164,7 @@ func (r *EdgeNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	isReady, reason, msg, err := r.handleReconciliation(ctx, &node, restartRequested)
-	return r.updateStatusAndReturn(ctx, &node, isReady, reason, msg, err)
+	return r.updateStatusAndReturn(ctx, &node, prevStatus, isReady, reason, msg, err)
 }
 
 // SetupWithManager registers the EdgeNodeReconciler with the controller
@@ -169,7 +183,7 @@ func (r *EdgeNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		r.Recorder = mgr.GetEventRecorderFor("edgenode-controller") //nolint:staticcheck
 	}
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&v1alpha1.EdgeNode{}).
+		For(&v1alpha1.EdgeNode{}, builder.WithPredicates(edgeNodeEventPredicate)).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.mapSecretToEdgeNodes),

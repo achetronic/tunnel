@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -172,12 +173,12 @@ func (r *EdgeNodeReconciler) getSSHExecutor(ctx context.Context, node *v1alpha1.
 }
 
 // updateStatusAndReturn sets the Ready condition and the ObservedGeneration of
-// the EdgeNode and persists the status. On the happy path it requeues after
-// requeueInterval so the operator periodically re-reconciles: this detects drift
-// on the VPS, refreshes the reported health/handshake status, and keeps retrying
+// the EdgeNode and persists the status if it has changed compared to prevStatus.
+// On the happy path it requeues after requeueInterval so the operator periodically re-reconciles:
+// this detects drift on the VPS, refreshes the reported health/handshake status, and keeps retrying
 // transient conditions even when no watch event fires. A conflict on the status
 // update is translated into a clean requeue.
-func (r *EdgeNodeReconciler) updateStatusAndReturn(ctx context.Context, node *v1alpha1.EdgeNode, status metav1.ConditionStatus, reason, msg string, returnErr error) (ctrl.Result, error) {
+func (r *EdgeNodeReconciler) updateStatusAndReturn(ctx context.Context, node *v1alpha1.EdgeNode, prevStatus *v1alpha1.EdgeNodeStatus, status metav1.ConditionStatus, reason, msg string, returnErr error) (ctrl.Result, error) {
 	node.Status.ObservedGeneration = node.Generation
 	meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
@@ -186,6 +187,14 @@ func (r *EdgeNodeReconciler) updateStatusAndReturn(ctx context.Context, node *v1
 		Message:            msg,
 		ObservedGeneration: node.Generation,
 	})
+
+	if prevStatus != nil && equality.Semantic.DeepEqual(prevStatus, &node.Status) {
+		// No change in status, skip Update to avoid reconciliation hot loops.
+		if returnErr != nil {
+			return ctrl.Result{}, returnErr
+		}
+		return ctrl.Result{RequeueAfter: r.requeueInterval()}, nil
+	}
 
 	if err := r.Status().Update(ctx, node); err != nil {
 		if apierrors.IsConflict(err) {

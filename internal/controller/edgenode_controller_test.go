@@ -26,6 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,6 +38,31 @@ import (
 
 // activeServiceOutput is the systemctl output for a running service.
 const activeServiceOutput = "active\n"
+
+// statusWriteCountingClient wraps a client.Client and counts how many times
+// Status().Update() is invoked. The envtest apiserver silently no-ops updates
+// whose content is identical (the ResourceVersion does not change), so counting
+// the calls at the client boundary is the only honest way to assert that the
+// reconciler skipped the status write rather than relying on the apiserver to
+// absorb it.
+type statusWriteCountingClient struct {
+	client.Client
+	statusUpdates *int
+}
+
+func (c *statusWriteCountingClient) Status() client.SubResourceWriter {
+	return &countingSubResourceWriter{SubResourceWriter: c.Client.Status(), count: c.statusUpdates}
+}
+
+type countingSubResourceWriter struct {
+	client.SubResourceWriter
+	count *int
+}
+
+func (w *countingSubResourceWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	*w.count++
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
 
 // healthyFakeExecutor returns a FakeExecutor whose RunFunc answers the probes
 // issued during provisioning with a healthy VPS.
@@ -310,6 +337,87 @@ var _ = Describe("EdgeNode Controller", func() {
 			Expect(k8sClient.Get(ctx, typeNamespacedName, updated)).To(Succeed())
 			_, present := updated.Annotations["tunnel.achetronic.com/restart-envoy"]
 			Expect(present).To(BeFalse())
+		})
+
+		It("should skip the status write on a second reconcile when status did not change", func() {
+			By("Reconciling the resource for the first time")
+			statusUpdates := 0
+			controllerReconciler := &EdgeNodeReconciler{
+				Client:       &statusWriteCountingClient{Client: k8sClient, statusUpdates: &statusUpdates},
+				Scheme:       k8sClient.Scheme(),
+				TunnelctlDir: tunnelctlTestDir,
+				ExecutorFactory: func(ctx context.Context, node *tunnelv1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error) {
+					return healthyFakeExecutor(), nil
+				},
+			}
+
+			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("Asserting the first reconcile persisted the status")
+			Expect(statusUpdates).To(BeNumerically(">=", 1))
+
+			By("Reconciling a second time with no changes and asserting no status write happens")
+			statusUpdates = 0
+			_, err = controllerReconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: typeNamespacedName,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(statusUpdates).To(BeZero())
+		})
+
+		It("asserts the predicate composition behaves as intended", func() {
+			By("setting up EdgeNodes for the update event")
+			oldNode := &tunnelv1alpha1.EdgeNode{
+				ObjectMeta: metav1.ObjectMeta{
+					Generation: 1,
+					Annotations: map[string]string{
+						"foo": "bar",
+					},
+					Labels: map[string]string{
+						"app": "tunnel",
+					},
+				},
+			}
+
+			By("1. Testing status-only update event (same generation, same annotations, same labels)")
+			newNodeStatusOnly := oldNode.DeepCopy()
+			newNodeStatusOnly.Status.ObservedGeneration = 1
+			// Status updates do not bump generation, annotations, or labels
+			updateStatusOnly := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNodeStatusOnly,
+			}
+			Expect(edgeNodeEventPredicate.Update(updateStatusOnly)).To(BeFalse())
+
+			By("2. Testing generation bump (spec change)")
+			newNodeGenBump := oldNode.DeepCopy()
+			newNodeGenBump.Generation = 2
+			updateGenBump := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNodeGenBump,
+			}
+			Expect(edgeNodeEventPredicate.Update(updateGenBump)).To(BeTrue())
+
+			By("3. Testing annotation change")
+			newNodeAnnotationChange := oldNode.DeepCopy()
+			newNodeAnnotationChange.Annotations["foo"] = "qux"
+			updateAnnotationChange := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNodeAnnotationChange,
+			}
+			Expect(edgeNodeEventPredicate.Update(updateAnnotationChange)).To(BeTrue())
+
+			By("4. Testing label change")
+			newNodeLabelChange := oldNode.DeepCopy()
+			newNodeLabelChange.Labels["app"] = "different"
+			updateLabelChange := event.UpdateEvent{
+				ObjectOld: oldNode,
+				ObjectNew: newNodeLabelChange,
+			}
+			Expect(edgeNodeEventPredicate.Update(updateLabelChange)).To(BeTrue())
 		})
 	})
 })
