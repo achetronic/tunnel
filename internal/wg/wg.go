@@ -112,6 +112,16 @@ func Apply(cfg agentconfig.WireGuardConfig) error {
 		return fmt.Errorf("bring link %q up: %w", name, err)
 	}
 
+	return syncRoutes(link, cfg)
+}
+
+// syncRoutes converges the device's routes to the peer allowed-IPs: it
+// installs a route per allowed-IP and deletes the routes no current peer
+// justifies (e.g. after an uplink scale-down), so traffic to a removed
+// replica is not blackholed through a stale route. Split from Apply so the
+// netlink glue is testable against a real (dummy) interface without a
+// WireGuard device.
+func syncRoutes(link netlink.Link, cfg agentconfig.WireGuardConfig) error {
 	for _, peer := range cfg.Peers {
 		for _, cidr := range peer.AllowedIPs {
 			_, ipnet, err := net.ParseCIDR(cidr)
@@ -129,14 +139,11 @@ func Apply(cfg agentconfig.WireGuardConfig) error {
 		}
 	}
 
-	// Reconcile away routes for peers that no longer exist (e.g. an uplink
-	// scale-down): without this, traffic to a removed replica is silently
-	// blackholed through a stale route and `ip route` lies about the topology.
 	installed, err := netlink.RouteListFiltered(netlink.FAMILY_ALL,
 		&netlink.Route{LinkIndex: link.Attrs().Index},
 		netlink.RT_FILTER_OIF)
 	if err != nil {
-		return fmt.Errorf("list routes on %q: %w", name, err)
+		return fmt.Errorf("list routes on %q: %w", link.Attrs().Name, err)
 	}
 	for _, stale := range staleRoutes(cfg, installed) {
 		if err := netlink.RouteDel(&stale); err != nil {
