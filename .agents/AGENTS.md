@@ -58,9 +58,9 @@ pure + deterministic:
 | `internal/configtransform` | Generic CEL postprocessor: applies `{path, expr}` rules on top of a config before parsing, with helpers (`getenv`, `readFile`, `fromJSON`, `fromYAML`, `cidrHost`). The uplink uses it (asset `assets/uplink.transforms.yaml`) to resolve per-replica identity declaratively, so no bespoke uplink binary is needed. |
 | `internal/render` | Deterministic text rendering of the Envoy LDS/CDS (`envoy.go`). Sort slices before rendering: output hash MUST be stable for identical input. |
 | `internal/wg` / `internal/nftables` | Native apply/status of WireGuard (netlink + wgctrl) and nftables (`google/nftables`) from an `agentconfig` document. |
-| `internal/agentrun` | Shared apply/status/run core behind `tunnelctl` (apply, watch + re-apply, readiness), used by both the edge oneshot and the uplink daemon. |
+| `internal/agentrun` | Shared apply/status/run core behind `tunnelctl` (apply, watch + re-apply, readiness), used by both the edge oneshot and the uplink daemon. A failed initial apply retries in the background with backoff (1s..60s) until any apply succeeds. |
 | `internal/version` | Operator version stamped via `-ldflags`, logged at startup. |
-| `internal/ipam` | Tunnel IP math from the CIDR: relay = `.1`, uplink replica = `.2 + ordinal`. |
+| `internal/ipam` | Tunnel IP math over the whole CIDR prefix: relay = base+1, uplink replica = base+2+ordinal. Works for non-aligned bases and networks wider than /24; rejects the broadcast address. |
 | `internal/provision` | SSH enrollment (`enroll.go`), `health.go`, `teardown.go`. Idempotent: only writes/restarts when local hashes differ from the remote `state.json`. Also pushes TLS material (cert/key/ca) to the edge for offload/mutual bindings. |
 | `internal/sshexec` | The **only** boundary to the VPS. `Executor` interface (every call takes a `context.Context`); `ssh.go` real impl, `fake.go` for tests. |
 | `internal/controller` | The two reconcilers (thin; delegate to the packages above). Files split by ownership: `*_controller.go` = kubebuilder surface (struct, `Reconcile`, `SetupWithManager`, RBAC markers); `*_sync.go` = our reconcile logic; `*_utils.go` = helpers. |
@@ -75,9 +75,10 @@ pure + deterministic:
   (stored in `<node>-uplink-keys` Secret), generates the VPS keypair over SSH once and
   caches it in the `<node>-vps-key` Secret, enrolls the VPS, lists all PortBindings
   referencing the node, resolves Service targets to ClusterIPs, calls `planner.BuildPlan`,
-  and pushes config. The happy path returns an empty result (no fixed periodic requeue):
-  re-render is driven by watches (the EdgeNode, the trigger label, and the TLS Secrets it
-  references). Drift detection compares `status.appliedConfigHash` + per-artifact hashes
+  and pushes config. The happy path requeues after `RequeueInterval` (default 3 min) as a
+  drift-detection safety net; re-render between requeues is driven by watches (the EdgeNode,
+  the trigger label, and the TLS Secrets it references). Drift detection compares
+  `status.appliedConfigHash` + per-artifact hashes
   against the remote `state.json` and only re-pushes/restarts when they differ. Optimistic
   conflicts become clean requeues.
 - **TLS at the edge:** a TCP binding may set `tls: { mode, secretRef }`. `passthrough`
@@ -87,13 +88,17 @@ pure + deterministic:
   (`TLSSecretIncomplete` Ready reason otherwise), pushes cert/key/ca to the VPS, and emits a
   `PrivateKeyOnEdge` warning Event the first time the key is written. `SetupWithManager`
   `Watches` Secrets and `mapSecretToEdgeNodes` re-enqueues affected EdgeNodes on rotation.
-- **PortBindings have their own independent reconciler.** The two controllers never share
-  state; they meet only through `spec.edgeNodeRef`. `PortBindingReconciler` never touches
-  SSH/uplink/targets: on create/update it adds a finalizer and bumps the
-  `tunnel.achetronic.com/last-portbinding-trigger` label on the referenced EdgeNode; on
-  delete the finalizer lets it bump that label one last time (so the EdgeNode re-renders
-  and drops the listeners) before removing the finalizer. A missing EdgeNode makes the
-  trigger a no-op.
+- **PortBindings have their own independent reconciler.** The two controllers share no
+  code or memory; they communicate exclusively through the API server.
+  `PortBindingReconciler` never touches SSH/uplink/targets: on create/update it adds a
+  finalizer and bumps the `tunnel.achetronic.com/last-portbinding-trigger` label on the
+  referenced EdgeNode; on delete the finalizer lets it bump that label one last time (so
+  the EdgeNode re-renders and drops the listeners) before removing the finalizer. A
+  missing EdgeNode makes the trigger a no-op. In the other direction, the
+  EdgeNodeReconciler publishes `status.appliedBindings` after each successful enroll and
+  the PortBindingReconciler `Watches` EdgeNodes to re-enqueue its bindings when that
+  status changes (this watch deliberately reacts to status updates; the EdgeNode's own
+  `For()` predicate filters them out — predicates are per-watch, they don't clash).
 - **Deletion is finalizer-guarded** (`tunnel.achetronic.com/finalizer`). Teardown runs
   `provision.Teardown` over SSH and then `deleteUplinkResources` deletes the uplink
   StatefulSet/ConfigMap/Secret explicitly; owner-reference GC does NOT apply because
@@ -123,11 +128,14 @@ pure + deterministic:
   controller-runtime's logr onto the same slog handler (`logr.FromSlogHandler`), so reconciler
   logs and the lower-level `provision` slog logs share one stream. `debug` shows per-step
   enrollment detail.
-- `PortBindingReconciler` does populate `PortBindingStatus`: it sets `ObservedGeneration`
-  and a `Ready` condition (reason `Synced`) once it has nudged the referenced EdgeNode.
-  What it does NOT populate is `PortBindingStatus.ResolvedTargets`: target resolution lives
-  in the planner during EdgeNode reconciliation and is reflected only in the rendered config
-  and the EdgeNode plan, never mirrored back into PortBinding status.
+- `PortBindingReconciler` populates `PortBindingStatus` with `ObservedGeneration` and two
+  conditions: `Programmed` (reason `Synced`, the trigger reached the EdgeNode) and `Ready`
+  (True/reason `Applied` only once the EdgeNode's `status.appliedBindings` lists the
+  binding — i.e. the port is in the plan actually applied on the edge; `NotYetApplied` /
+  `EdgeNodeNotFound` otherwise). GitOps tooling should gate on `Ready`. What it does NOT
+  populate is `PortBindingStatus.ResolvedTargets`: target resolution lives in the planner
+  during EdgeNode reconciliation and is reflected only in the rendered config and the
+  EdgeNode plan, never mirrored back into PortBinding status.
 
 ## Validation Split (no admission webhooks)
 
@@ -155,6 +163,10 @@ resources. Do NOT scaffold a webhook unless explicitly asked.
   code never references the fake and no magic address is involved.
 - e2e tests are build-tagged `e2e` and require an **isolated Kind cluster**, never your
   real dev/prod cluster. `make test-e2e` manages cluster lifecycle.
+- The suite must stay green for an anonymous contributor with nothing but Go installed:
+  no VPS, no Docker, no VM. Tests needing real privileges (e.g. `TestSyncRoutes_Kernel`
+  creates a dummy interface, needs root) self-skip with an explicit "SKIPPED, NOT TESTED"
+  log and document the sudo command that provides the coverage.
 
 ## Code Rules (from DESIGN_AND_RULES.md, enforced)
 
