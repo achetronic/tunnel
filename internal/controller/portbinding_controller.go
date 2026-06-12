@@ -47,7 +47,7 @@ type PortBindingReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings/finalizers,verbs=update
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes,verbs=get;list;watch;update;patch

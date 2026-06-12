@@ -34,8 +34,11 @@ rules:
     resources:
       - services
     verbs:
+      - create
       - get
       - list
+      - patch
+      - update
       - watch
   - apiGroups:
       - apps
@@ -55,8 +58,6 @@ rules:
       - edgenodes
       - portbindings
     verbs:
-      - create
-      - delete
       - get
       - list
       - patch

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr"
@@ -284,6 +285,24 @@ func (r *EdgeNodeReconciler) createOrUpdateConfigMap(ctx context.Context, cm *co
 	return err
 }
 
+// createOrUpdateHeadlessService creates or updates the headless Service the
+// uplink StatefulSet's spec.serviceName references. ClusterIP is immutable on
+// update, so only labels and selector are reconciled.
+func (r *EdgeNodeReconciler) createOrUpdateHeadlessService(ctx context.Context, svc *corev1.Service) error {
+	target := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: svc.Name, Namespace: svc.Namespace},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, target, func() error {
+		target.Labels = svc.Labels
+		target.Spec.Selector = svc.Spec.Selector
+		if target.CreationTimestamp.IsZero() {
+			target.Spec.ClusterIP = svc.Spec.ClusterIP
+		}
+		return nil
+	})
+	return err
+}
+
 // createOrUpdateStatefulSet creates or updates the uplink StatefulSet, using
 // CreateOrUpdate so optimistic conflicts are handled by the helper.
 func (r *EdgeNodeReconciler) createOrUpdateStatefulSet(ctx context.Context, sts *appsv1.StatefulSet) error {
@@ -452,6 +471,12 @@ func (r *EdgeNodeReconciler) mapSecretToEdgeNodes(ctx context.Context, obj clien
 
 	var pbList v1alpha1.PortBindingList
 	if err := r.List(ctx, &pbList); err != nil {
+		// Losing this event silently would mean a missed certificate
+		// rotation: the renewed Secret never reaches the VPS and the edge
+		// keeps serving the old cert until something else re-enqueues the
+		// node. The mapping cannot retry, so at minimum leave a trace.
+		log.FromContext(ctx).Error(err, "failed to list PortBindings while mapping a Secret event; a TLS rotation may be missed",
+			"secret", secretNamespace+"/"+secretName)
 		return nil
 	}
 

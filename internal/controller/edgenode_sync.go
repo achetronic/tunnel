@@ -388,6 +388,13 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 		return metav1.ConditionFalse, "ConfigMapUpdateFailed", fmt.Sprintf("Failed to update ConfigMap: %v", err), err
 	}
 
+	// The headless Service backs the StatefulSet's spec.serviceName (per-pod
+	// DNS identity); created here so the reference never dangles.
+	svc := uplink.BuildHeadlessService(node)
+	if err := r.createOrUpdateHeadlessService(ctx, svc); err != nil {
+		return metav1.ConditionFalse, "ServiceUpdateFailed", fmt.Sprintf("Failed to update headless Service: %v", err), err
+	}
+
 	sts := uplink.BuildStatefulSet(node, r.uplinkImage(), corev1.PullIfNotPresent)
 	if err := r.createOrUpdateStatefulSet(ctx, sts); err != nil {
 		return metav1.ConditionFalse, "StatefulSetUpdateFailed", fmt.Sprintf("Failed to update StatefulSet: %v", err), err

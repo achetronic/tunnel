@@ -73,13 +73,13 @@ type EdgeNodeReconciler struct {
 	UplinkImage string
 }
 
-// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 
@@ -167,6 +167,27 @@ func (r *EdgeNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return r.updateStatusAndReturn(ctx, &node, prevStatus, isReady, reason, msg, err)
 }
 
+// tlsSecretShaped passes only Secrets that can plausibly be referenced by a
+// PortBinding TLS SecretRef: the kubernetes.io/tls type or anything carrying a
+// tls.crt key (cert-manager and hand-made certs alike). Every other Secret in
+// the cluster (tokens, registry creds, helm releases) previously funneled
+// through mapSecretToEdgeNodes and triggered a PortBinding List per change.
+// Note this trims reconcile churn, not manager memory: the informer cache
+// still holds all Secrets because the reconciler reads SSH and uplink-key
+// Secrets (Opaque) through the same cached client, so a cache-level selector
+// would break those Gets.
+var tlsSecretShaped = predicate.NewPredicateFuncs(func(obj client.Object) bool {
+	secret, ok := obj.(*corev1.Secret)
+	if !ok {
+		return false
+	}
+	if secret.Type == corev1.SecretTypeTLS {
+		return true
+	}
+	_, hasCert := secret.Data[corev1.TLSCertKey]
+	return hasCert
+})
+
 // SetupWithManager registers the EdgeNodeReconciler with the controller
 // manager. It wires a default event recorder when none was injected; the
 // ExecutorFactory is left nil so production reconciles dial the real host.
@@ -187,6 +208,7 @@ func (r *EdgeNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.mapSecretToEdgeNodes),
+			builder.WithPredicates(tlsSecretShaped),
 		).
 		Complete(r)
 }

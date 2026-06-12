@@ -75,14 +75,13 @@ This document tracks pending architectural improvements and technical debt.
 ## 17. [MEDIUM] ~~PortBinding `Ready=True` means "triggered", not "applied"~~ ✅ DONE (jun 2026)
 - **Fixed:** Gateway API-style condition pair, reconcilers coupled only through the API server. `EdgeNodeStatus` gained `appliedBindings` (sorted namespace/name set, listType=set), written by the EdgeNodeReconciler after each successful enroll. The PortBindingReconciler sets `Programmed=True` on trigger (the old Ready semantics) and `Ready=True` (reason `Applied`) only when its key appears in the referenced EdgeNode's `appliedBindings`; missing node ⇒ `EdgeNodeNotFound`, not yet in plan ⇒ `NotYetApplied`. A `Watches(&EdgeNode{})` with a mapping func re-enqueues the node's bindings on status change (this watch deliberately reacts to status updates; the EdgeNode's own For() predicate from item 9 filters them out, predicates are per-watch so they don't clash). envtest specs cover both states + the mapping func; mutation check on evaluateApplied passes (always-True killed). PENDING live validation: end-to-end Ready transition against a real VPS (the full sync path needs SSH).
 
-## 18. [MEDIUM] Grouped minor findings from the audit
-- **Context/Task:** Small, independent fixes confirmed in the audit:
-  - `mapSecretToEdgeNodes` swallows List errors without logging (a TLS/SSH secret rotation can be silently missed) — log the error.
-  - RBAC grants `create`/`delete` on the operator's own CRDs — trim to what the controller actually needs.
-  - The Secrets watch is cluster-wide and unfiltered — add a field/label selector or namespace scoping (manager memory on large clusters).
-  - ipam is anchored to the 4th octet — breaks with CIDRs that are not `.0`-aligned `/24`s; compute offsets properly over the CIDR.
-  - The planner does not reserve 8080/9901 as forbidden ports — a PortBinding can collide with the readiness endpoint / Envoy admin.
-  - The STS `ServiceName` points to a headless Service nobody creates — create it (or drop the reference).
-  - `--leader-elect` defaults to false — flip the default to true.
-- **When:** Batch them in one cleanup pass after items 9–17.
+## 18. [MEDIUM] ~~Grouped minor findings from the audit~~ ✅ DONE (jun 2026)
+- **Fixed, all seven in one pass:**
+  - `mapSecretToEdgeNodes` logs List failures (a missed TLS rotation now leaves a trace).
+  - RBAC trimmed: no `create`/`delete` on `edgenodes`/`portbindings` (markers + Helm rbac.yaml).
+  - Secrets watch filtered by the `tlsSecretShaped` predicate (type `kubernetes.io/tls` or a `tls.crt` key). Trims reconcile churn, NOT cache memory: a cache-level selector would break the SSH/uplink-key Secret Gets through the cached client; documented in the predicate.
+  - ipam computes host offsets over the full 32-bit address (`hostAt`): non-.0-aligned bases (`10.200.0.128/25` → relay `.129`) and >/24 networks (offsets cross octet boundaries) work; broadcast rejected per-prefix.
+  - Planner rejects PortBindings on reserved ports 8080 (uplink readiness) and 9901 (Envoy admin/metrics) with a named-owner error.
+  - `BuildHeadlessService` + `createOrUpdateHeadlessService`: the STS `spec.serviceName` reference now resolves (ClusterIP None, selector-only; services RBAC gained create/update/patch).
+  - `--leader-elect` defaults to true (binary flag + Helm values), single SSH writer per VPS guaranteed across replicas.
 

@@ -154,6 +154,23 @@ func TestBuildPlan(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected tunnel port conflict error")
 	}
+
+	// Reserved infrastructure ports (TODO #18): the uplink readiness
+	// endpoint and the Envoy admin/metrics port must be rejected.
+	for _, port := range []int32{8080, 9901} {
+		bindingsReserved := []v1alpha1.PortBinding{
+			{
+				Spec: v1alpha1.PortBindingSpec{
+					Bindings: []v1alpha1.PortBindingDefinition{
+						{ListenPort: port, Name: "a"},
+					},
+				},
+			},
+		}
+		if _, err := BuildPlan(node, bindingsReserved, resolver, "priv", "pub", keys); err == nil {
+			t.Fatalf("expected reserved port error for %d", port)
+		}
+	}
 }
 
 // TestBuildPlanErrorCases covers all critical error paths that were missing

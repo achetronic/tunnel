@@ -324,9 +324,20 @@ func buildRelayPeers(ipCalc *ipam.IPAM, uplinkKeys map[int32]string, replicas in
 	return wgPeers, nil
 }
 
+// reservedPorts are listen ports the data path claims for itself on the VPS:
+// the uplink readiness endpoint Envoy health-checks (8080) and the Envoy admin
+// interface / metrics DNAT (9901). A PortBinding on either would silently
+// shadow or break the infrastructure, so the planner rejects the collision
+// with a precise message.
+var reservedPorts = map[int32]string{
+	uplinkReadinessPort: "uplink readiness endpoint",
+	metricsPort:         "Envoy admin/metrics",
+}
+
 // collectBindingDefs flattens every PortBindingDefinition across the active
-// PortBindings, rejecting collisions with the tunnel listenPort and duplicate
-// listen ports, and returns them sorted by ListenPort for deterministic output.
+// PortBindings, rejecting collisions with the tunnel listenPort, the reserved
+// infrastructure ports and duplicate listen ports, and returns them sorted by
+// ListenPort for deterministic output.
 func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1alpha1.PortBindingDefinition, error) {
 	usedPorts := make(map[int32]string)
 	var allDefs []v1alpha1.PortBindingDefinition
@@ -334,6 +345,9 @@ func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1
 		for _, def := range pb.Spec.Bindings {
 			if def.ListenPort == listenPort {
 				return nil, fmt.Errorf("binding %s uses tunnel listenPort %d", def.Name, listenPort)
+			}
+			if owner, reserved := reservedPorts[def.ListenPort]; reserved {
+				return nil, fmt.Errorf("binding %s uses port %d, reserved for the %s", def.Name, def.ListenPort, owner)
 			}
 			if existing, ok := usedPorts[def.ListenPort]; ok {
 				return nil, fmt.Errorf("port conflict on %d between %s and %s", def.ListenPort, existing, def.Name)

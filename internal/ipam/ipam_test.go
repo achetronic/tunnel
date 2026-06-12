@@ -29,10 +29,37 @@ func TestIPAM(t *testing.T) {
 			},
 		},
 		{
-			name:      "network too small to contain .1",
+			// Non-.0-aligned base (TODO #18): offsets are computed over the
+			// whole prefix, so base+1 is .129, not a hardcoded .1 outside
+			// the network.
+			name:      "non-aligned /25 base",
 			network:   "10.200.0.128/25",
-			expectErr: false, // New succeeds; RelayIP is where it fails
-			relayIP:   "",    // RelayIP must return an error
+			expectErr: false,
+			relayIP:   "10.200.0.129",
+			replicaIPs: map[int32]string{
+				0: "10.200.0.130",
+			},
+			replicaErrs: map[int32]bool{
+				// base+2+125 = .255, the /25 broadcast.
+				125: true,
+			},
+		},
+		{
+			// Wider-than-/24 network (TODO #18): the host offset crosses the
+			// third-octet boundary instead of erroring at 254.
+			name:      "/23 crosses octet boundary",
+			network:   "10.200.0.0/23",
+			expectErr: false,
+			relayIP:   "10.200.0.1",
+			replicaIPs: map[int32]string{
+				0:   "10.200.0.2",
+				254: "10.200.1.0",
+				255: "10.200.1.1",
+			},
+			replicaErrs: map[int32]bool{
+				// base+2+509 = 10.200.1.255, the /23 broadcast.
+				509: true,
+			},
 		},
 		{
 			name:      "invalid CIDR",
