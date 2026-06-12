@@ -72,10 +72,8 @@ This document tracks pending architectural improvements and technical debt.
 ## 16. [MEDIUM] ~~`EnvoyVersion` interpolated into VPS shell without sanitisation~~ ✅ DONE (jun 2026)
 - **Fixed:** `installEnvoyBinary` rejects any version that is not bare semver (`^[0-9]+\.[0-9]+\.[0-9]+$`) before any remote command runs (mutation-tested: gutting the guard fails the suite; injection payloads never reach the FakeExecutor). The controller's `DefaultEnvoyVersion` fallback keeps production plans always valid; the Enroll test plans gained the explicit version they implicitly relied on.
 
-## 17. [MEDIUM] PortBinding `Ready=True` means "triggered", not "applied"
-- **Context:** The condition is set when the label is written, not when the port is actually applied on the edge. GitOps tooling (Argo/Flux) will read it as "operational".
-- **Task:** Only set `Ready=True` once the EdgeNode reconcile confirms the port is in the applied plan (or introduce a separate `Programmed`/`Ready` pair with honest semantics).
-- **When:** Soon; observability correctness.
+## 17. [MEDIUM] ~~PortBinding `Ready=True` means "triggered", not "applied"~~ ✅ DONE (jun 2026)
+- **Fixed:** Gateway API-style condition pair, reconcilers coupled only through the API server. `EdgeNodeStatus` gained `appliedBindings` (sorted namespace/name set, listType=set), written by the EdgeNodeReconciler after each successful enroll. The PortBindingReconciler sets `Programmed=True` on trigger (the old Ready semantics) and `Ready=True` (reason `Applied`) only when its key appears in the referenced EdgeNode's `appliedBindings`; missing node ⇒ `EdgeNodeNotFound`, not yet in plan ⇒ `NotYetApplied`. A `Watches(&EdgeNode{})` with a mapping func re-enqueues the node's bindings on status change (this watch deliberately reacts to status updates; the EdgeNode's own For() predicate from item 9 filters them out, predicates are per-watch so they don't clash). envtest specs cover both states + the mapping func; mutation check on evaluateApplied passes (always-True killed). PENDING live validation: end-to-end Ready transition against a real VPS (the full sync path needs SSH).
 
 ## 18. [MEDIUM] Grouped minor findings from the audit
 - **Context/Task:** Small, independent fixes confirmed in the audit:

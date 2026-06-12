@@ -249,6 +249,15 @@ type EdgeNodeStatus struct {
 	// (relay + proxy + nft). It is the anchor used for drift detection.
 	// +optional
 	AppliedConfigHash string `json:"appliedConfigHash,omitempty"`
+
+	// AppliedBindings lists the PortBindings (as namespace/name) whose
+	// definitions are materialized in the last successfully applied plan.
+	// The PortBindingReconciler watches this field to set each binding's
+	// Ready condition honestly: present here means the port is actually
+	// programmed on the edge, not merely requested.
+	// +listType=set
+	// +optional
+	AppliedBindings []string `json:"appliedBindings,omitempty"`
 }
 
 // +kubebuilder:object:root=true

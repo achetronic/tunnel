@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -418,6 +419,23 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 	node.Status.PublicKey = vpsPubKey
 	node.Status.AppliedConfigHash = plan.PlanHash
 	node.Status.Uplink = newUplinks
+	node.Status.AppliedBindings = appliedBindingKeys(bindings)
 
 	return r.evaluateReadiness(ctx, node, health, sts, replicas)
+}
+
+// appliedBindingKeys renders the PortBindings materialized in the applied plan
+// as sorted "namespace/name" keys for EdgeNodeStatus.AppliedBindings. Sorted so
+// the status is deterministic and DeepEqual-friendly for the no-op status
+// update skip.
+func appliedBindingKeys(bindings []v1alpha1.PortBinding) []string {
+	if len(bindings) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(bindings))
+	for _, pb := range bindings {
+		keys = append(keys, pb.Namespace+"/"+pb.Name)
+	}
+	sort.Strings(keys)
+	return keys
 }
