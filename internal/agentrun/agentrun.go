@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -26,6 +28,14 @@ import (
 // be considered ready. WireGuard refreshes the latest handshake only on rekey
 // (about every 120s), so the threshold sits above that to avoid flapping.
 const handshakeFreshness = 180 * time.Second
+
+// Backoff bounds for retrying the initial apply. The first attempt already
+// failed when the retry loop starts, so it begins at the floor and doubles
+// up to the cap.
+const (
+	initialApplyBackoffFloor = 1 * time.Second
+	initialApplyBackoffCap   = 60 * time.Second
+)
 
 // Loader returns the fully-resolved desired-state document ready to apply. It is
 // called for the initial apply, on every config-change re-apply, and by the
@@ -66,21 +76,55 @@ func Readiness(state wg.State) (bool, string) {
 	return false, "no recent handshake"
 }
 
+// applyState serializes Apply calls issued by the daemon's goroutines (the
+// initial-apply retry loop and the config watcher) and remembers whether any
+// apply has succeeded, so the retry loop can stop once the node converged
+// through either path. fn defaults to Apply; tests inject a fake.
+type applyState struct {
+	mu        sync.Mutex
+	succeeded atomic.Bool
+	fn        func(*agentconfig.Document) error
+}
+
+// apply runs the apply function under the lock and records success.
+func (s *applyState) apply(doc *agentconfig.Document) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn := s.fn
+	if fn == nil {
+		fn = Apply
+	}
+	if err := fn(doc); err != nil {
+		return err
+	}
+	s.succeeded.Store(true)
+	return nil
+}
+
 // Run applies the document from load, watches watchPath and re-applies on change,
 // and serves a readiness endpoint at healthAddr backed by the same status core.
 // It blocks until the readiness server stops.
 func Run(ctx context.Context, load Loader, watchPath, healthAddr string) error {
+	// st serializes Apply calls between the retry loop and the watcher and
+	// records whether any of them has succeeded yet.
+	st := &applyState{}
+
 	doc, err := load()
 	if err != nil {
 		return err
 	}
-	if err := Apply(doc); err != nil {
-		slog.Error("initial apply failed", "error", err)
+	if err := st.apply(doc); err != nil {
+		// A failed initial apply used to leave the daemon Running but
+		// NotReady forever (no CrashLoop to rescue it, nothing retrying
+		// until the config changed). Retry in the background with backoff
+		// until something applies successfully.
+		slog.Error("initial apply failed, retrying with backoff", "error", err)
+		go retryInitialApply(st, load, time.Sleep)
 	} else {
 		slog.Info("applied desired state", "interface", doc.WireGuard.Interface.Name)
 	}
 
-	go watchConfig(load, watchPath)
+	go watchConfig(st, load, watchPath)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ready", readyHandler(load))
@@ -101,11 +145,41 @@ func Run(ctx context.Context, load Loader, watchPath, healthAddr string) error {
 	return nil
 }
 
+// retryInitialApply re-attempts the initial apply with exponential backoff
+// (floor 1s, cap 60s) until an apply succeeds, reloading the document on each
+// attempt so a config fix is picked up. It exits as soon as st records a
+// success, including one achieved by the config watcher. sleep is injected
+// for tests.
+func retryInitialApply(st *applyState, load Loader, sleep func(time.Duration)) {
+	backoff := initialApplyBackoffFloor
+	for {
+		sleep(backoff)
+		if st.succeeded.Load() {
+			return
+		}
+		doc, err := load()
+		if err != nil {
+			slog.Error("initial apply retry: reload config failed", "error", err, "next_attempt_in", backoff*2)
+		} else if err := st.apply(doc); err != nil {
+			slog.Error("initial apply retry failed", "error", err, "next_attempt_in", backoff*2)
+		} else {
+			slog.Info("initial apply succeeded after retry", "interface", doc.WireGuard.Interface.Name)
+			return
+		}
+		if backoff < initialApplyBackoffCap {
+			backoff *= 2
+			if backoff > initialApplyBackoffCap {
+				backoff = initialApplyBackoffCap
+			}
+		}
+	}
+}
+
 // watchConfig watches the directory holding the config file and re-applies on
 // change. Kubernetes swaps a mounted ConfigMap through a "..data" symlink, so
 // both that and the file itself are treated as triggers. Apply failures are
 // logged, not fatal, so a transient bad config can recover when it is fixed.
-func watchConfig(load Loader, path string) {
+func watchConfig(st *applyState, load Loader, path string) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		slog.Error("failed to create config watcher", "error", err)
@@ -136,7 +210,7 @@ func watchConfig(load Loader, path string) {
 				slog.Error("reload config failed", "error", err)
 				continue
 			}
-			if err := Apply(doc); err != nil {
+			if err := st.apply(doc); err != nil {
 				slog.Error("re-apply failed", "error", err)
 				continue
 			}

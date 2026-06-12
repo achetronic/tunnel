@@ -66,10 +66,8 @@ This document tracks pending architectural improvements and technical debt.
 ## 14. [MEDIUM] ~~`spec.uplink.namespace` is mutable and orphans resources on teardown~~ ✅ DONE (jun 2026)
 - **Fixed:** field-level CEL immutability rule (`+kubebuilder:validation:XValidation:rule="self == oldSelf"`, message "uplink.namespace is immutable") on `UplinkSpec.Namespace`. The default (`tunnel`) is applied at admission, so `oldSelf` is always populated and the rule also covers specs that omitted the field. Three-part edit done per DESIGN_AND_RULES §5: CRDs regenerated, synced to `deploy/helm/tunnel/crds/`, sample comment updated. `make verify` green.
 
-## 15. [MEDIUM] Initial `Apply` in `agentrun` has no retry
-- **Context:** If the first `Apply` fails (e.g. a race with the kernel module at startup), nothing retries until the ConfigMap changes. The pod stays `Running` but NotReady forever, with no CrashLoop to rescue it.
-- **Task:** Retry the initial apply with backoff (or exit non-zero on persistent failure so the kubelet restarts the container).
-- **When:** Soon; turns a transient race into a permanent outage today.
+## 15. [MEDIUM] ~~Initial `Apply` in `agentrun` has no retry~~ ✅ DONE (jun 2026)
+- **Fixed:** a failed initial apply now spawns a background retry loop with exponential backoff (1s floor, 60s cap) that reloads the document on each attempt (so a config fix is picked up) and stops as soon as ANY apply succeeds, including one performed by the config watcher. Apply calls from the retry loop and the watcher are serialized through a shared `applyState` (mutex + success flag). Mutation-tested: removing the success short-circuit and freezing the backoff both fail the suite.
 
 ## 16. [MEDIUM] `EnvoyVersion` interpolated into VPS shell without sanitisation
 - **Context:** The value ends up inside shell commands run as root on the VPS. The vector is operator-controlled (a flag), but a typo should not be a root RCE.
