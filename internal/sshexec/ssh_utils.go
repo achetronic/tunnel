@@ -1,15 +1,16 @@
 package sshexec
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"regexp"
 	"strings"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
 // hostKeyCallback builds the SSH host key verification callback. When a
@@ -27,32 +28,63 @@ func hostKeyCallback(cfg Config) (ssh.HostKeyCallback, error) {
 }
 
 // knownHostsCallback parses an OpenSSH known_hosts blob and returns a callback
-// that accepts the connection only if the presented host key matches one of the
-// pinned keys.
+// that accepts the connection only if the presented host key matches the pinned
+// key for that hostname.
 func knownHostsCallback(data []byte) (ssh.HostKeyCallback, error) {
-	var keys []ssh.PublicKey
+	// First, run a lightweight pre-validation pass to preserve existing behavior:
+	// - malformed data returns a "failed to parse knownHosts: ..." error
+	// - empty/zero entries returns a "no host keys found in knownHosts data" error
+	var parsedAny bool
 	rest := data
 	for {
-		_, _, pub, _, remaining, err := ssh.ParseKnownHosts(rest)
+		_, _, _, _, remaining, err := ssh.ParseKnownHosts(rest)
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse knownHosts: %w", err)
 		}
-		keys = append(keys, pub)
+		parsedAny = true
 		rest = remaining
 	}
-	if len(keys) == 0 {
+	if !parsedAny {
 		return nil, fmt.Errorf("no host keys found in knownHosts data")
 	}
-	return func(hostname string, _ net.Addr, key ssh.PublicKey) error {
-		for _, k := range keys {
-			if bytes.Equal(k.Marshal(), key.Marshal()) {
-				return nil
-			}
+
+	// Because knownhosts.New requires a file path, we write the data to a temporary file.
+	tmpFile, err := os.CreateTemp("", "tunnel-knownhosts-*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create temp file for known_hosts: %w", err)
+	}
+	tempPath := tmpFile.Name()
+	defer func() {
+		_ = os.Remove(tempPath)
+	}()
+
+	if _, err := tmpFile.Write(data); err != nil {
+		_ = tmpFile.Close()
+		return nil, fmt.Errorf("failed to write known_hosts to temp file: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close temp file: %w", err)
+	}
+
+	khCallback, err := knownhosts.New(tempPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize known_hosts callback: %w", err)
+	}
+
+	// Remove the temp file immediately because knownhosts.New parses the file eagerly
+	// into an in-memory database and does not need it on disk afterwards. Note that
+	// public host keys are not secret material, so this brief disk write is acceptable.
+	_ = os.Remove(tempPath)
+
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		err := khCallback(hostname, remote, key)
+		if err != nil {
+			return fmt.Errorf("ssh: host key verification failed for %s: key does not match any known_hosts entry for that host: %w", hostname, err)
 		}
-		return fmt.Errorf("ssh: host key verification failed for %s", hostname)
+		return nil
 	}, nil
 }
 
