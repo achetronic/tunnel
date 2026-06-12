@@ -93,7 +93,10 @@ type TunnelNetworkSpec struct {
 // uplink replicas that terminate the WireGuard tunnels and apply the DNAT table.
 type UplinkSpec struct {
 	// Namespace is where the uplink StatefulSet, ConfigMap and Secrets are created.
+	// Immutable: changing it after creation would make teardown look in the new
+	// namespace and orphan the resources already created in the old one.
 	// +kubebuilder:default="tunnel"
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="uplink.namespace is immutable"
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 

@@ -65,10 +65,8 @@ This document tracks pending architectural improvements and technical debt.
 - **Task:** Diff desired vs. installed routes during apply and delete the stale ones (same pattern as the peer reconciliation).
 - **When:** Soon; bites on any replica scale-down.
 
-## 14. [MEDIUM] `spec.uplink.namespace` is mutable and orphans resources on teardown
-- **Context:** If the namespace changes after resources were created, teardown looks in the new namespace, sees NotFound, removes the finalizer and leaves the STS + ConfigMap + Secrets orphaned in the old one.
-- **Task:** Add a CEL immutability rule (`self == oldSelf`) on `spec.uplink.namespace`.
-- **When:** Soon; one-line CRD validation (three-part CRD edit per DESIGN_AND_RULES §5).
+## 14. [MEDIUM] ~~`spec.uplink.namespace` is mutable and orphans resources on teardown~~ ✅ DONE (jun 2026)
+- **Fixed:** field-level CEL immutability rule (`+kubebuilder:validation:XValidation:rule="self == oldSelf"`, message "uplink.namespace is immutable") on `UplinkSpec.Namespace`. The default (`tunnel`) is applied at admission, so `oldSelf` is always populated and the rule also covers specs that omitted the field. Three-part edit done per DESIGN_AND_RULES §5: CRDs regenerated, synced to `deploy/helm/tunnel/crds/`, sample comment updated. `make verify` green.
 
 ## 15. [MEDIUM] Initial `Apply` in `agentrun` has no retry
 - **Context:** If the first `Apply` fails (e.g. a race with the kernel module at startup), nothing retries until the ConfigMap changes. The pod stays `Running` but NotReady forever, with no CrashLoop to rescue it.

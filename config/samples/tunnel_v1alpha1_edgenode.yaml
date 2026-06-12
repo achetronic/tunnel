@@ -88,7 +88,8 @@ spec:
   # the WireGuard tunnels and apply the DNAT rules.
   uplink:
     # Namespace where the uplink StatefulSet, ConfigMap and keys Secret are
-    # created. Default: tunnel.
+    # created. Immutable after creation (changing it would orphan the resources
+    # in the old namespace). Default: tunnel.
     namespace: tunnel
     # Number of active-active replicas. Each one is an independent WireGuard peer,
     # and Envoy load-balances across the healthy tunnels, so more than one gives

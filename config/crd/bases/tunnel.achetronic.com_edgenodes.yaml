@@ -1120,9 +1120,14 @@ spec:
                     type: object
                   namespace:
                     default: tunnel
-                    description: Namespace is where the uplink StatefulSet, ConfigMap
-                      and Secrets are created.
+                    description: |-
+                      Namespace is where the uplink StatefulSet, ConfigMap and Secrets are created.
+                      Immutable: changing it after creation would make teardown look in the new
+                      namespace and orphan the resources already created in the old one.
                     type: string
+                    x-kubernetes-validations:
+                    - message: uplink.namespace is immutable
+                      rule: self == oldSelf
                   nodeSelector:
                     additionalProperties:
                       type: string
