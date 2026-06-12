@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -127,7 +128,49 @@ func Apply(cfg agentconfig.WireGuardConfig) error {
 			}
 		}
 	}
+
+	// Reconcile away routes for peers that no longer exist (e.g. an uplink
+	// scale-down): without this, traffic to a removed replica is silently
+	// blackholed through a stale route and `ip route` lies about the topology.
+	installed, err := netlink.RouteListFiltered(netlink.FAMILY_ALL,
+		&netlink.Route{LinkIndex: link.Attrs().Index},
+		netlink.RT_FILTER_OIF)
+	if err != nil {
+		return fmt.Errorf("list routes on %q: %w", name, err)
+	}
+	for _, stale := range staleRoutes(cfg, installed) {
+		if err := netlink.RouteDel(&stale); err != nil {
+			return fmt.Errorf("delete stale route %q: %w", stale.Dst, err)
+		}
+	}
 	return nil
+}
+
+// staleRoutes returns the installed routes on the device that no current peer
+// allowed-IP justifies. It is pure (no IO) so it is unit-tested. Only routes
+// this package could have installed are candidates: kernel-originated routes
+// (the implicit route of the interface address) and routes without a
+// destination are never touched.
+func staleRoutes(cfg agentconfig.WireGuardConfig, installed []netlink.Route) []netlink.Route {
+	desired := make(map[string]struct{})
+	for _, peer := range cfg.Peers {
+		for _, cidr := range peer.AllowedIPs {
+			if _, ipnet, err := net.ParseCIDR(cidr); err == nil {
+				desired[ipnet.String()] = struct{}{}
+			}
+		}
+	}
+
+	var stale []netlink.Route
+	for _, r := range installed {
+		if r.Dst == nil || r.Protocol == unix.RTPROT_KERNEL {
+			continue
+		}
+		if _, ok := desired[r.Dst.String()]; !ok {
+			stale = append(stale, r)
+		}
+	}
+	return stale
 }
 
 // Status reports the observed state of the device. A missing link yields

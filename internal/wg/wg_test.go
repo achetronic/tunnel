@@ -1,9 +1,12 @@
 package wg
 
 import (
+	"net"
 	"testing"
 	"time"
 
+	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
 	"github.com/achetronic/tunnel/internal/agentconfig"
@@ -134,5 +137,65 @@ func TestBuildDeviceConfig_Errors(t *testing.T) {
 				t.Fatalf("expected an error for %q", name)
 			}
 		})
+	}
+}
+
+// mustCIDR parses a CIDR into the *net.IPNet shape RouteList returns.
+func mustCIDR(t *testing.T, s string) *net.IPNet {
+	t.Helper()
+	_, ipnet, err := net.ParseCIDR(s)
+	if err != nil {
+		t.Fatalf("parse cidr %q: %v", s, err)
+	}
+	return ipnet
+}
+
+// staleRoutes must flag exactly the routes whose destination no current peer
+// claims, and must never touch kernel-originated routes (the implicit route of
+// the interface address) or routes without a destination (default routes).
+func TestStaleRoutes(t *testing.T) {
+	cfg := agentconfig.WireGuardConfig{
+		Peers: []agentconfig.WireGuardPeer{
+			{PublicKey: "k1", AllowedIPs: []string{"10.200.0.2/32"}},
+			{PublicKey: "k2", AllowedIPs: []string{"10.200.0.3/32"}},
+		},
+	}
+
+	keep1 := netlink.Route{Dst: mustCIDR(t, "10.200.0.2/32")}
+	keep2 := netlink.Route{Dst: mustCIDR(t, "10.200.0.3/32")}
+	// Replica removed by a scale-down: its route must be flagged stale.
+	gone := netlink.Route{Dst: mustCIDR(t, "10.200.0.4/32")}
+	// Kernel route for the interface address subnet: never touched even
+	// though no peer claims it.
+	kernel := netlink.Route{Dst: mustCIDR(t, "10.200.0.0/24"), Protocol: unix.RTPROT_KERNEL}
+	// Default route shape (nil Dst): never touched.
+	defaultRoute := netlink.Route{Dst: nil}
+
+	stale := staleRoutes(cfg, []netlink.Route{keep1, keep2, gone, kernel, defaultRoute})
+
+	if len(stale) != 1 {
+		t.Fatalf("expected exactly 1 stale route, got %d: %v", len(stale), stale)
+	}
+	if stale[0].Dst.String() != "10.200.0.4/32" {
+		t.Errorf("stale route is %q, want 10.200.0.4/32", stale[0].Dst)
+	}
+}
+
+// A config with no peers flags every non-kernel destination route as stale,
+// and an empty route list yields no work.
+func TestStaleRoutes_Edges(t *testing.T) {
+	empty := agentconfig.WireGuardConfig{}
+
+	if got := staleRoutes(empty, nil); len(got) != 0 {
+		t.Errorf("no routes installed: expected none stale, got %v", got)
+	}
+
+	routes := []netlink.Route{
+		{Dst: mustCIDR(t, "10.200.0.2/32")},
+		{Dst: mustCIDR(t, "10.200.0.0/24"), Protocol: unix.RTPROT_KERNEL},
+	}
+	got := staleRoutes(empty, routes)
+	if len(got) != 1 || got[0].Dst.String() != "10.200.0.2/32" {
+		t.Errorf("scale to zero: expected only 10.200.0.2/32 stale, got %v", got)
 	}
 }
