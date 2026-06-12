@@ -44,44 +44,7 @@ This document tracks pending architectural improvements and technical debt.
 - **Task:** Wire `ctx` through: stop the fsnotify watcher and call `srv.Shutdown(ctx)` when `ctx` is done (run `ListenAndServe` in a goroutine, select on `ctx.Done()`), and treat `http.ErrServerClosed` as a clean exit. Have `tunnelctl run` pass a signal-bound context instead of `context.Background()`.
 - **When:** Low priority (no production impact), but cheap and removes the dropped-parameter smell.
 
----
-
-*Items 9–18 come from the June 2026 robustness audit (3 workers + manual confirmation against the code; `make verify` green incl. race). Severity noted per item. These are the agreed working set.*
-
-## 9. [HIGH] ~~EdgeNode reconcile hot loop: status update re-queues itself~~ ✅ DONE (jun 2026)
-- **Fixed:** `For()` now carries `predicate.Or(GenerationChangedPredicate, AnnotationChangedPredicate, LabelChangedPredicate)` (`edgeNodeEventPredicate`), and `updateStatusAndReturn` skips the `Status().Update()` when the status is semantically DeepEqual to the snapshot taken after the Get. Regression tests: a status-write-counting client wrapper proves the second reconcile performs zero status writes (mutation-tested: fails with the skip disabled), plus direct predicate assertions (status-only → no enqueue; generation/annotation/label change → enqueue).
-
-## 10. [HIGH] ~~Envoy admin address hardcoded to `10.200.0.1` in the bootstrap~~ ✅ DONE (jun 2026)
-- **Fixed:** the planner now exposes `Plan.RelayIP` (already embedded in RelayDocument, so its hash covers changes; PlanHash untouched) and `ensureEnvoyRunning` templates the admin address from it, failing loudly when empty. The bootstrap delivery is change-aware without touching State: the remote `/etc/envoy/envoy.yaml` is compared with the desired content — identical means no Put and no restart, different/missing means Put + restart (Envoy only reads the bootstrap at startup, so a relay-network change now actually takes effect). Default-network nodes get byte-identical content, so upgrading the operator causes zero restarts. Tests mutation-verified (hardcoded-IP, never-diff and always-diff mutants all killed).
-
-## 11. [HIGH] ~~known_hosts verification ignores the hostname~~ ✅ DONE (jun 2026)
-- **Fixed:** `knownHostsCallback` now delegates to `x/crypto/ssh/knownhosts.New` (hostname-aware matching, [host]:port entries, hashed entries, @revoked markers). The Secret blob is written to a temp file (knownhosts.New only takes paths; parsed eagerly, removed right after; host public keys are not secret material). A pre-validation pass preserves the clear malformed/empty errors, and verification failures wrap `*knownhosts.KeyError` so callers can inspect them. Canary test verified against the old code: a key pinned for host A is now rejected for host B (the old callback accepted any key in the blob for any host). Operational note: for non-standard SSH ports the Secret must contain `[host]:port` entries (`ssh-keyscan -p` produces them).
-
-## 12. [MEDIUM] ~~Enroll early-exit misses `TunnelctlHash` and `EnvoyVersion` (silently ineffective upgrades)~~ ✅ DONE (jun 2026)
-- **Fixed:** the local tunnelctl binary hash is now resolved before the early-exit (new `resolveTunnelctlBinary` helper; one extra cheap `uname -m` per steady-state pass) and both `state.TunnelctlHash` and the new `state.EnvoyVersion` field joined the early-exit condition. `installEnvoyBinary` now probes and downloads in separate steps, returning `replaced`; when the binary was replaced, `Enroll` calls `RestartEnvoy` after `ensureEnvoyRunning` so the running process actually picks up the new release (a live systemd service never re-reads its binary). Pre-existing VPSes have an empty `state.EnvoyVersion`, which forces one idempotent pass that backfills it — no migration. Canaries mutation-verified against the old code (tunnelctl push and curl+restart both fail there).
-
-## 13. [MEDIUM] ~~Orphaned kernel routes on uplink scale-down~~ ✅ DONE (jun 2026)
-- **Fixed:** `Apply` now reconciles routes after installing them: the netlink glue lives in `syncRoutes(link, cfg)` and the pure `staleRoutes(cfg, installed)` flags the routes no current peer allowed-IP justifies; each one is `RouteDel`'d. Kernel-originated routes (`RTPROT_KERNEL`) and routes with nil Dst are never touched. Mutation-tested, and `TestSyncRoutes_Kernel` exercises the real netlink path (dummy interface, TEST-NET-2 addresses) when run as root; it self-skips with an explicit NOT TESTED log otherwise.
-
-## 14. [MEDIUM] ~~`spec.uplink.namespace` is mutable and orphans resources on teardown~~ ✅ DONE (jun 2026)
-- **Fixed:** field-level CEL immutability rule (`+kubebuilder:validation:XValidation:rule="self == oldSelf"`, message "uplink.namespace is immutable") on `UplinkSpec.Namespace`. The default (`tunnel`) is applied at admission, so `oldSelf` is always populated and the rule also covers specs that omitted the field. Three-part edit done per DESIGN_AND_RULES §5: CRDs regenerated, synced to `deploy/helm/tunnel/crds/`, sample comment updated. `make verify` green.
-
-## 15. [MEDIUM] ~~Initial `Apply` in `agentrun` has no retry~~ ✅ DONE (jun 2026)
-- **Fixed:** a failed initial apply now spawns a background retry loop with exponential backoff (1s floor, 60s cap) that reloads the document on each attempt (so a config fix is picked up) and stops as soon as ANY apply succeeds, including one performed by the config watcher. Apply calls from the retry loop and the watcher are serialized through a shared `applyState` (mutex + success flag). Mutation-tested: removing the success short-circuit and freezing the backoff both fail the suite.
-
-## 16. [MEDIUM] ~~`EnvoyVersion` interpolated into VPS shell without sanitisation~~ ✅ DONE (jun 2026)
-- **Fixed:** `installEnvoyBinary` rejects any version that is not bare semver (`^[0-9]+\.[0-9]+\.[0-9]+$`) before any remote command runs (mutation-tested: gutting the guard fails the suite; injection payloads never reach the FakeExecutor). The controller's `DefaultEnvoyVersion` fallback keeps production plans always valid; the Enroll test plans gained the explicit version they implicitly relied on.
-
-## 17. [MEDIUM] ~~PortBinding `Ready=True` means "triggered", not "applied"~~ ✅ DONE (jun 2026)
-- **Fixed:** Gateway API-style condition pair, reconcilers coupled only through the API server. `EdgeNodeStatus` gained `appliedBindings` (sorted namespace/name set, listType=set), written by the EdgeNodeReconciler after each successful enroll. The PortBindingReconciler sets `Programmed=True` on trigger (the old Ready semantics) and `Ready=True` (reason `Applied`) only when its key appears in the referenced EdgeNode's `appliedBindings`; missing node ⇒ `EdgeNodeNotFound`, not yet in plan ⇒ `NotYetApplied`. A `Watches(&EdgeNode{})` with a mapping func re-enqueues the node's bindings on status change (this watch deliberately reacts to status updates; the EdgeNode's own For() predicate from item 9 filters them out, predicates are per-watch so they don't clash). envtest specs cover both states + the mapping func; mutation check on evaluateApplied passes (always-True killed). PENDING live validation: end-to-end Ready transition against a real VPS (the full sync path needs SSH).
-
-## 18. [MEDIUM] ~~Grouped minor findings from the audit~~ ✅ DONE (jun 2026)
-- **Fixed, all seven in one pass:**
-  - `mapSecretToEdgeNodes` logs List failures (a missed TLS rotation now leaves a trace).
-  - RBAC trimmed: no `create`/`delete` on `edgenodes`/`portbindings` (markers + Helm rbac.yaml).
-  - Secrets watch filtered by the `tlsSecretShaped` predicate (type `kubernetes.io/tls` or a `tls.crt` key). Trims reconcile churn, NOT cache memory: a cache-level selector would break the SSH/uplink-key Secret Gets through the cached client; documented in the predicate.
-  - ipam computes host offsets over the full 32-bit address (`hostAt`): non-.0-aligned bases (`10.200.0.128/25` → relay `.129`) and >/24 networks (offsets cross octet boundaries) work; broadcast rejected per-prefix.
-  - Planner rejects PortBindings on reserved ports 8080 (uplink readiness) and 9901 (Envoy admin/metrics) with a named-owner error.
-  - `BuildHeadlessService` + `createOrUpdateHeadlessService`: the STS `spec.serviceName` reference now resolves (ClusterIP None, selector-only; services RBAC gained create/update/patch).
-  - `--leader-elect` defaults to true (binary flag + Helm values), single SSH writer per VPS guaranteed across replicas.
-
+## 9. Live end-to-end validation of the robustness-audit fixes
+- **Context:** The test suite covers everything fakeable (envtest + FakeExecutor for SSH, a root-gated netlink test for routes); what remains genuinely needs a real VPS + Kind session with real WireGuard handshakes.
+- **Task:** Verify on a real enroll: the PortBinding `Ready` transition, stale-route deletion visible in `ip route` after an uplink scale-down, the uplink headless Service resolving per-pod DNS, and that leader election does not get in the way under `make run` (disable with `--leader-elect=false` if it does).
+- **When:** Blocked on regenerating access to the dev VPS (recreated; the `vps-ssh-secret` is stale).

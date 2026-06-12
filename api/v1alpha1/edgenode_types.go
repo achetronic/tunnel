@@ -39,7 +39,8 @@ type SSHSpec struct {
 	// expected to carry a "password" or a "privateKey" entry (and optionally a
 	// "passphrase" for an encrypted private key). It may also carry a
 	// "knownHosts" entry (OpenSSH known_hosts format, e.g. the output of
-	// "ssh-keyscan") used to verify the VPS host key.
+	// "ssh-keyscan") used to verify the VPS host key. For a non-standard SSH
+	// port the entry must use the [host]:port form (ssh-keyscan -p produces it).
 	// +required
 	SecretRef SecretReference `json:"secretRef"`
 

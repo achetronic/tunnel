@@ -43,7 +43,9 @@ spec:
     #   - password    : SSH password
     #   - passphrase  : optional passphrase for an encrypted privateKey
     #   - knownHosts  : recommended OpenSSH known_hosts content to pin the host
-    #                   key, e.g. the output of `ssh-keyscan 203.0.113.10`
+    #                   key, e.g. the output of `ssh-keyscan 203.0.113.10`. For
+    #                   a non-standard SSH port use `ssh-keyscan -p <port>`,
+    #                   which produces the required [host]:port entries.
     secretRef:
       name: vps-ssh-secret
       # Namespace of the Secret. Defaults to the EdgeNode namespace when omitted.
