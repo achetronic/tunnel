@@ -99,6 +99,25 @@ func TestEnroll_TLSRotationReloadsViaSDS(t *testing.T) {
 		switch {
 		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
 			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "cat /etc/envoy/envoy.yaml"):
+			return `node:
+  id: tunnel-relay
+  cluster: tunnel-relay
+
+admin:
+  address:
+    socket_address:
+      address: 10.200.0.1
+      port_value: 9901
+
+dynamic_resources:
+  lds_config:
+    path_config_source:
+      path: /etc/envoy/lds.yaml
+  cds_config:
+    path_config_source:
+      path: /etc/envoy/cds.yaml
+`, nil
 		case strings.Contains(cmd, "uname -m"):
 			return unameX8664, nil
 		case strings.Contains(cmd, "tunnelctl status"):
@@ -118,6 +137,7 @@ func TestEnroll_TLSRotationReloadsViaSDS(t *testing.T) {
 		TunnelctlDir:      tunnelctlFixtureDir(t),
 		EnvoyLDSHash:      "l",
 		EnvoyCDSHash:      "c",
+		RelayIP:           "10.200.0.1",
 	}
 
 	sdsPath := "/etc/envoy/tls/web.sds.yaml"

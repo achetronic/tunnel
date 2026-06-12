@@ -102,7 +102,7 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 	if err := applyEnvoyConfig(ctx, exec, plan, state); err != nil {
 		return false, err
 	}
-	if err := ensureEnvoyRunning(ctx, exec); err != nil {
+	if err := ensureEnvoyRunning(ctx, exec, plan); err != nil {
 		return false, err
 	}
 	return tlsApplied, nil
@@ -309,20 +309,35 @@ func applyEnvoyConfig(ctx context.Context, exec sshexec.Executor, plan *planner.
 }
 
 // ensureEnvoyRunning deploys the static bootstrap config that points Envoy at
-// the LDS/CDS files and makes sure the service is active, without restarting it
-// when it already runs.
-func ensureEnvoyRunning(ctx context.Context, exec sshexec.Executor) error {
+// the LDS/CDS files and makes sure the service is active. To prevent unnecessary
+// restarts of a live Envoy in steady state, we perform a remote-compare of the
+// remote bootstrap configuration.
+// If the bootstrap configuration is missing or differs from the desired content,
+// we Put the new bootstrap and issue systemctl enable envoy && systemctl restart envoy
+// because Envoy only reads its bootstrap configuration at startup. For default-network
+// nodes, the bootstrap content is byte-identical, which guarantees that upgrading
+// the operator causes zero restarts.
+// If the configuration is identical, we skip Put and only start the service if
+// it is not active.
+func ensureEnvoyRunning(ctx context.Context, exec sshexec.Executor, plan *planner.Plan) error {
 	slog.Info("enroll: ensuring envoy is running")
+	if plan == nil {
+		return fmt.Errorf("ensureEnvoyRunning: plan is nil")
+	}
+	if plan.RelayIP == "" {
+		return fmt.Errorf("ensureEnvoyRunning: plan.RelayIP is empty")
+	}
+
 	// node id/cluster are mandatory in the bootstrap when dynamic_resources
 	// (file-based LDS/CDS) are used, otherwise Envoy refuses to load the config.
-	bootstrapYAML := `node:
+	bootstrapYAML := fmt.Sprintf(`node:
   id: tunnel-relay
   cluster: tunnel-relay
 
 admin:
   address:
     socket_address:
-      address: 10.200.0.1
+      address: %s
       port_value: 9901
 
 dynamic_resources:
@@ -332,22 +347,42 @@ dynamic_resources:
   cds_config:
     path_config_source:
       path: /etc/envoy/cds.yaml
-`
-	if err := exec.Put(ctx, "/etc/envoy/envoy.yaml", []byte(bootstrapYAML)); err != nil {
-		return fmt.Errorf("failed to put envoy.yaml bootstrap: %w", err)
+`, plan.RelayIP)
+
+	currentYAML, err := exec.Run(ctx, "cat /etc/envoy/envoy.yaml")
+	var needsUpdate bool
+	if err != nil {
+		if isExitError(err) {
+			// The file is missing or cat returned non-zero. Treat as different/missing.
+			needsUpdate = (currentYAML != bootstrapYAML)
+		} else {
+			return fmt.Errorf("failed to read remote envoy bootstrap: %w", err)
+		}
+	} else {
+		needsUpdate = (currentYAML != bootstrapYAML)
 	}
 
-	// Start envoy when it is not already active. If it is in a failed or
-	// activating (auto-restart) state from a previous bad config, restart it so
-	// it reloads the bootstrap just written. A healthy envoy is left untouched so
-	// steady-state reconciles never bounce live connections.
-	out, err := exec.Run(ctx, "systemctl is-active envoy")
-	if err != nil && !isExitError(err) {
-		return fmt.Errorf("failed to query envoy status: %w", err)
-	}
-	if strings.TrimSpace(out) != serviceActive {
+	if needsUpdate {
+		slog.Info("enroll: envoy bootstrap configuration differs or is missing, writing new config and restarting envoy")
+		if err := exec.Put(ctx, "/etc/envoy/envoy.yaml", []byte(bootstrapYAML)); err != nil {
+			return fmt.Errorf("failed to put envoy.yaml bootstrap: %w", err)
+		}
 		if _, err := exec.Run(ctx, "systemctl enable envoy && systemctl restart envoy"); err != nil {
-			return fmt.Errorf("failed to start envoy: %w", err)
+			return fmt.Errorf("failed to restart envoy after bootstrap update: %w", err)
+		}
+	} else {
+		// The bootstrap on the VPS already matches. Start envoy only when it is
+		// not active (failed or auto-restarting from a previous bad config); a
+		// healthy envoy is left untouched so steady-state reconciles never
+		// bounce live connections.
+		out, err := exec.Run(ctx, "systemctl is-active envoy")
+		if err != nil && !isExitError(err) {
+			return fmt.Errorf("failed to query envoy status: %w", err)
+		}
+		if strings.TrimSpace(out) != serviceActive {
+			if _, err := exec.Run(ctx, "systemctl enable envoy && systemctl restart envoy"); err != nil {
+				return fmt.Errorf("failed to start envoy: %w", err)
+			}
 		}
 	}
 

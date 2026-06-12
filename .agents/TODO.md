@@ -51,10 +51,8 @@ This document tracks pending architectural improvements and technical debt.
 ## 9. [HIGH] ~~EdgeNode reconcile hot loop: status update re-queues itself~~ ✅ DONE (jun 2026)
 - **Fixed:** `For()` now carries `predicate.Or(GenerationChangedPredicate, AnnotationChangedPredicate, LabelChangedPredicate)` (`edgeNodeEventPredicate`), and `updateStatusAndReturn` skips the `Status().Update()` when the status is semantically DeepEqual to the snapshot taken after the Get. Regression tests: a status-write-counting client wrapper proves the second reconcile performs zero status writes (mutation-tested: fails with the skip disabled), plus direct predicate assertions (status-only → no enqueue; generation/annotation/label change → enqueue).
 
-## 10. [HIGH] Envoy admin address hardcoded to `10.200.0.1` in the bootstrap
-- **Context:** `enroll.go:324` — the bootstrap YAML carries that literal IP. With a non-default `spec.tunnel.network`, Envoy tries to bind an address that does not exist on the host, fails, `waitEnvoyActive` detects it, and the enroll fails *forever* for that network.
-- **Task:** The relay IP is already computed in the planner; pass it through to the bootstrap template instead of the literal.
-- **When:** Now. Blocks any non-default tunnel network.
+## 10. [HIGH] ~~Envoy admin address hardcoded to `10.200.0.1` in the bootstrap~~ ✅ DONE (jun 2026)
+- **Fixed:** the planner now exposes `Plan.RelayIP` (already embedded in RelayDocument, so its hash covers changes; PlanHash untouched) and `ensureEnvoyRunning` templates the admin address from it, failing loudly when empty. The bootstrap delivery is change-aware without touching State: the remote `/etc/envoy/envoy.yaml` is compared with the desired content — identical means no Put and no restart, different/missing means Put + restart (Envoy only reads the bootstrap at startup, so a relay-network change now actually takes effect). Default-network nodes get byte-identical content, so upgrading the operator causes zero restarts. Tests mutation-verified (hardcoded-IP, never-diff and always-diff mutants all killed).
 
 ## 11. [HIGH] known_hosts verification ignores the hostname
 - **Context:** `ssh_utils.go:31-56` — the `hosts[]` returned by `ParseKnownHosts` are discarded, so the host-key callback accepts any key present in the file for any host. With a single VPS it is barely exploitable, but the anti-MitM semantics are broken as soon as the Secret holds more than one entry.

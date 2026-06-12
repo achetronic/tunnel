@@ -88,6 +88,11 @@ type Plan struct {
 	// identifies the full desired state and backs EdgeNode.status.appliedConfigHash.
 	PlanHash string
 
+	// RelayIP is the relay's overlay address inside the tunnel network. It is
+	// already embedded in RelayDocument (so RelayDocumentHash covers changes
+	// to it) and deliberately does NOT feed PlanHash separately.
+	RelayIP string
+
 	// TLSMaterials lists the TLS credential requirements for every binding that
 	// needs key material pushed to the VPS (offload and mutual modes). It is
 	// sorted by BindingName for deterministic output. Passthrough bindings are

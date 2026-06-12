@@ -145,6 +145,7 @@ func BuildPlan(
 		UplinkDocument:     uplinkDocument,
 		UplinkDocumentHash: uplinkDocHash,
 		PlanHash:           planHash,
+		RelayIP:            relayIP,
 		TLSMaterials:       tlsMaterials,
 	}, nil
 }
