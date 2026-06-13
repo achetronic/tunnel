@@ -123,12 +123,18 @@ func (e *SSHExecutor) keepaliveLoop() {
 }
 
 // Close stops the keepalive loop and closes the underlying SSH connection.
-// It is safe to call more than once.
+// Both operations run inside closeOnce so every call after the first is a
+// no-op that returns nil. Idempotency is required because the context-
+// cancellation branches in Run and Put call Close to unblock any goroutine
+// stalled inside writePacket against a dead peer, and the controller then
+// calls Close again through its deferred teardown.
 func (e *SSHExecutor) Close() error {
+	var err error
 	e.closeOnce.Do(func() {
 		close(e.stop)
+		err = e.client.Close()
 	})
-	return e.client.Close()
+	return err
 }
 
 // Run executes cmd on the VPS and returns its combined stdout/stderr.
@@ -143,7 +149,16 @@ func (e *SSHExecutor) Run(ctx context.Context, cmd string) (out string, err erro
 	if err != nil {
 		return "", fmt.Errorf("failed to open SSH session: %w", err)
 	}
+
+	// forcedClose is set true when the cancel branch calls e.Close so the
+	// deferred session.Close below suppresses the synthetic error that comes
+	// from closing a session whose underlying transport is already gone.
+	forcedClose := false
 	defer func() {
+		if forcedClose {
+			_ = session.Close()
+			return
+		}
 		if cerr := session.Close(); cerr != nil && !errors.Is(cerr, io.EOF) {
 			err = errors.Join(err, fmt.Errorf("failed to close SSH session: %w", cerr))
 		}
@@ -160,8 +175,15 @@ func (e *SSHExecutor) Run(ctx context.Context, cmd string) (out string, err erro
 
 	select {
 	case <-ctx.Done():
-		// Closing the session unblocks the goroutine's session.Run.
-		_ = session.Close()
+		// e.Close shuts down the OS socket directly, bypassing SSH channel
+		// mutexes. session.Close would deadlock against a dead peer because
+		// channel.Close calls writePacket, which tries to acquire ch.writeMu,
+		// the same mutex the goroutine above may already hold inside a blocked
+		// writePacket. Closing the OS socket forces the kernel to fail any
+		// pending Write immediately, releasing all mutexes and letting the
+		// goroutine return.
+		forcedClose = true
+		_ = e.Close()
 		e.awaitOrTeardown(done)
 		return buf.String(), fmt.Errorf("command %q cancelled: %w", cmd, ctx.Err())
 	case runErr := <-done:
@@ -188,7 +210,16 @@ func (e *SSHExecutor) Put(ctx context.Context, path string, content []byte) (err
 	if err != nil {
 		return fmt.Errorf("failed to open SSH session for %s: %w", path, err)
 	}
+
+	// forcedClose is set true when a cancel branch calls e.Close so the
+	// deferred session.Close below suppresses the synthetic error that comes
+	// from closing a session whose underlying transport is already gone.
+	forcedClose := false
 	defer func() {
+		if forcedClose {
+			_ = session.Close()
+			return
+		}
 		if cerr := session.Close(); cerr != nil && !errors.Is(cerr, io.EOF) {
 			err = errors.Join(err, fmt.Errorf("failed to close SSH session for %s: %w", path, cerr))
 		}
@@ -220,7 +251,15 @@ func (e *SSHExecutor) Put(ctx context.Context, path string, content []byte) (err
 
 	select {
 	case <-ctx.Done():
-		_ = session.Close()
+		// e.Close shuts down the OS socket directly, bypassing SSH channel
+		// mutexes. session.Close would deadlock against a dead peer because
+		// channel.Close calls writePacket, which tries to acquire ch.writeMu,
+		// the same mutex the copy goroutine may already hold inside a blocked
+		// writePacket. Closing the OS socket forces the kernel to fail any
+		// pending Write immediately, releasing all mutexes and letting the
+		// goroutine return.
+		forcedClose = true
+		_ = e.Close()
 		e.awaitOrTeardown(copyErr)
 		return fmt.Errorf("write to %s cancelled: %w", path, ctx.Err())
 	case cerr := <-copyErr:
@@ -237,7 +276,13 @@ func (e *SSHExecutor) Put(ctx context.Context, path string, content []byte) (err
 
 	select {
 	case <-ctx.Done():
-		_ = session.Close()
+		// e.Close shuts down the OS socket directly. Against a dead peer,
+		// session.Close sends MSG_CHANNEL_CLOSE via writePacket and then waits
+		// for the peer's acknowledgment, which never arrives. Closing the OS
+		// socket forces the kernel to fail any pending IO immediately,
+		// unblocking the goroutine waiting in session.Wait.
+		forcedClose = true
+		_ = e.Close()
 		e.awaitOrTeardown(waitErr)
 		return fmt.Errorf("write to %s cancelled: %w", path, ctx.Err())
 	case werr := <-waitErr:

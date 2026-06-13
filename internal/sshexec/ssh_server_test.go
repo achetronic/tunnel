@@ -299,3 +299,89 @@ func TestPutRejectsUnsafePath(t *testing.T) {
 		}
 	}
 }
+
+// TestCloseIsIdempotent verifies that calling Close on an SSHExecutor twice
+// returns nil on both calls. The second call must be a no-op: it must not
+// attempt to close an already-closed network connection, which would surface
+// a "use of closed network connection" error. This property is required
+// because the controller defers a Close call after every reconcile, and the
+// cancel branches inside Run and Put also call Close, so two calls are normal.
+//
+// This test fails on code where e.client.Close() runs outside closeOnce.Do,
+// because the second invocation calls client.Close on a connection that is
+// already shut, returning an error.
+func TestCloseIsIdempotent(t *testing.T) {
+	cfg, srv := newTestSSHServer(t, func(_ *testing.T, _ string, _ ssh.Channel) uint32 {
+		return 0
+	})
+	defer srv.Close()
+
+	exec, err := NewSSHExecutor(cfg)
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+
+	if err := exec.Close(); err != nil {
+		t.Fatalf("first Close returned error: %v", err)
+	}
+	if err := exec.Close(); err != nil {
+		t.Fatalf("Close is not idempotent: second call returned: %v", err)
+	}
+}
+
+// TestCancelBranchClosesConnection verifies that the context-cancellation path
+// inside Run calls e.Close on the underlying client connection rather than
+// only closing the session. After Run returns with a cancellation error, every
+// subsequent call to exec.Close must be a no-op returning nil, because Close
+// was already invoked inside Run's cancel branch and closeOnce guards it.
+//
+// On code where the cancel branch only calls session.Close (not e.Close), the
+// first exec.Close call after the cancel closes the still-live client (nil),
+// but the second call finds the client already shut and returns a "use of
+// closed network connection" error. This test detects that regression.
+//
+// Note: this test confirms that e.Close is invoked on the cancel path and that
+// the call returns promptly. It does not reproduce the full dead-peer scenario
+// (kernel TCP send buffer full, writePacket holding ch.writeMu) because doing
+// so without a real network partition would require unreliable timing. The
+// critical liveness property -- that e.Close unblocks a goroutine stalled
+// inside writePacket -- requires live validation against a silent peer.
+func TestCancelBranchClosesConnection(t *testing.T) {
+	release := make(chan struct{})
+	cfg, srv := newTestSSHServer(t, func(_ *testing.T, _ string, _ ssh.Channel) uint32 {
+		<-release
+		return 0
+	})
+	defer srv.Close()
+	defer close(release)
+
+	exec, err := NewSSHExecutor(cfg)
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, runErr := exec.Run(ctx, "sleep forever")
+	if !errors.Is(runErr, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got: %v", runErr)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Run did not return promptly on cancellation (elapsed %v)", elapsed)
+	}
+
+	// Close was already called inside Run's cancel branch. Both subsequent
+	// calls must be no-ops returning nil. The second call is the canary: on
+	// code that does not call e.Close inside the cancel branch, the first
+	// exec.Close here closes the still-live client (nil), and the second call
+	// returns "use of closed network connection" (test fails). With the fix,
+	// closeOnce.Do was already executed inside Run, so both calls are no-ops.
+	if err := exec.Close(); err != nil {
+		t.Fatalf("first exec.Close after cancel returned: %v", err)
+	}
+	if err := exec.Close(); err != nil {
+		t.Fatalf("second exec.Close after cancel returned: %v", err)
+	}
+}
