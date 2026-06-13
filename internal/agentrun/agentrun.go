@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -126,10 +127,12 @@ func Run(ctx context.Context, load Loader, watchPath, healthAddr string) error {
 	}
 
 	var watcherAlive atomic.Bool
-	go watchConfig(st, load, watchPath, &watcherAlive)
+	// runWatchConfig terminates the process when watchConfig returns, so the
+	// kubelet can restart the pod instead of leaving it silently broken.
+	go runWatchConfig(st, load, watchPath, &watcherAlive)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ready", readyHandler(load, &watcherAlive))
+	mux.HandleFunc("/ready", readyHandler(load, &watcherAlive, &st.succeeded))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	srv := &http.Server{
@@ -181,6 +184,9 @@ func retryInitialApply(st *applyState, load Loader, sleep func(time.Duration)) {
 // change. Kubernetes swaps a mounted ConfigMap through a "..data" symlink, so
 // both that and the file itself are treated as triggers. Apply failures are
 // logged, not fatal, so a transient bad config can recover when it is fixed.
+// watchConfig returns only when the watch cannot be maintained (NewWatcher
+// failure, Add failure, or the Events channel closing); callers must treat a
+// return as a fatal condition.
 func watchConfig(st *applyState, load Loader, path string, watcherAlive *atomic.Bool) {
 	defer watcherAlive.Store(false)
 
@@ -229,17 +235,44 @@ func watchConfig(st *applyState, load Loader, path string, watcherAlive *atomic.
 	}
 }
 
+// watchFatal is called when the config watcher cannot be maintained.
+// The default implementation calls os.Exit(1), which causes CrashLoopBackOff
+// so the kubelet restarts the pod. Tests override this var to record the call
+// without killing the test process.
+var watchFatal = func() { os.Exit(1) }
+
+// runWatchConfig calls watchConfig and, when it returns (which only happens
+// when the watch cannot be maintained: NewWatcher failure, Add failure, or the
+// Events channel closing), logs a fatal message and calls watchFatal. The
+// kubelet restart triggered by watchFatal is the self-healing recovery path
+// when no LivenessProbe is configured.
+func runWatchConfig(st *applyState, load Loader, path string, watcherAlive *atomic.Bool) {
+	watchConfig(st, load, path, watcherAlive)
+	slog.Error("config watcher terminated; process will exit so the kubelet can restart it")
+	watchFatal()
+}
+
 // wgStatus retrieves the WireGuard interface state. It is a package variable to
 // allow tests to override the status retrieval with a mock function.
 var wgStatus = wg.Status
 
-// readyHandler returns an HTTP handler that reports node readiness, reusing the
-// same status core as the status subcommand.
-// The handler treats not yet started watchers as not ready.
-func readyHandler(load Loader, watcherAlive *atomic.Bool) http.HandlerFunc {
+// readyHandler returns an HTTP handler that reports node readiness. The handler
+// returns 503 when the config watcher is not active (covering the startup window
+// and the brief period before process exit on watcher death), when the initial
+// full apply (WireGuard and nftables) has not yet succeeded, or when the
+// WireGuard handshake is not fresh. All three conditions must be satisfied for
+// the handler to return 200.
+func readyHandler(load Loader, watcherAlive *atomic.Bool, succeeded *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		if !watcherAlive.Load() {
 			http.Error(w, "config watcher is not active", http.StatusServiceUnavailable)
+			return
+		}
+		// Require at least one successful full apply (WireGuard and nftables)
+		// before reporting ready. Without this gate the pod would report 200
+		// while DNAT rules are absent, silently blackholing forwarded connections.
+		if !succeeded.Load() {
+			http.Error(w, "initial apply not yet succeeded", http.StatusServiceUnavailable)
 			return
 		}
 		doc, err := load()

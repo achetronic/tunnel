@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -128,12 +129,15 @@ func TestRetryInitialApply_BackoffCaps(t *testing.T) {
 func TestReadyHandler_WatcherNotActive(t *testing.T) {
 	var watcherAlive atomic.Bool
 	watcherAlive.Store(false)
+	// succeeded=true so only the watcherAlive=false gate is under test.
+	var succeeded atomic.Bool
+	succeeded.Store(true)
 
 	load := func() (*agentconfig.Document, error) {
 		return testDoc(), nil
 	}
 
-	handler := readyHandler(load, &watcherAlive)
+	handler := readyHandler(load, &watcherAlive, &succeeded)
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	rr := httptest.NewRecorder()
 
@@ -150,10 +154,13 @@ func TestReadyHandler_WatcherNotActive(t *testing.T) {
 }
 
 // TestReadyHandler_Healthy verifies that the readiness handler returns OK when
-// the config watcher is active and the WireGuard interface is healthy.
+// the config watcher is active, the initial apply has succeeded, and the
+// WireGuard interface is healthy.
 func TestReadyHandler_Healthy(t *testing.T) {
 	var watcherAlive atomic.Bool
 	watcherAlive.Store(true)
+	var succeeded atomic.Bool
+	succeeded.Store(true)
 
 	load := func() (*agentconfig.Document, error) {
 		return testDoc(), nil
@@ -174,7 +181,7 @@ func TestReadyHandler_Healthy(t *testing.T) {
 		}, nil
 	}
 
-	handler := readyHandler(load, &watcherAlive)
+	handler := readyHandler(load, &watcherAlive, &succeeded)
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	rr := httptest.NewRecorder()
 
@@ -187,5 +194,81 @@ func TestReadyHandler_Healthy(t *testing.T) {
 	wantBody := "OK\n"
 	if rr.Body.String() != wantBody {
 		t.Errorf("expected body %q, got %q", wantBody, rr.Body.String())
+	}
+}
+
+// TestReadyHandler_SucceededFalse is the M-2 canary. It verifies that the
+// readiness handler returns 503 when the initial full apply (WireGuard and
+// nftables) has not yet succeeded, even though the config watcher is active
+// and the WireGuard interface reports a fresh handshake. On HEAD 04b8774
+// this test fails because the old readyHandler does not inspect the succeeded
+// flag and returns 200 once WireGuard is healthy, silently hiding an absent
+// nftables ruleset.
+func TestReadyHandler_SucceededFalse(t *testing.T) {
+	var watcherAlive atomic.Bool
+	watcherAlive.Store(true)
+	var succeeded atomic.Bool
+	succeeded.Store(false)
+
+	load := func() (*agentconfig.Document, error) {
+		return testDoc(), nil
+	}
+
+	// Override wgStatus to return a healthy state so that the only source of
+	// a 503 is the succeeded=false gate, not the WireGuard check.
+	oldStatus := wgStatus
+	defer func() { wgStatus = oldStatus }()
+	wgStatus = func(cfg agentconfig.WireGuardConfig) (wg.State, error) {
+		return wg.State{
+			Exists: true,
+			Up:     true,
+			Peers:  []wg.PeerState{{LastHandshake: time.Now()}},
+		}, nil
+	}
+
+	handler := readyHandler(load, &watcherAlive, &succeeded)
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected status %d (initial apply not yet succeeded), got %d",
+			http.StatusServiceUnavailable, rr.Code)
+	}
+	wantBody := "initial apply not yet succeeded\n"
+	if rr.Body.String() != wantBody {
+		t.Errorf("expected body %q, got %q", wantBody, rr.Body.String())
+	}
+}
+
+// TestWatchFatal_CalledOnBadPath is the M-1 canary. It verifies that
+// runWatchConfig calls watchFatal when the watched directory does not exist
+// (watcher.Add fails), triggering process termination so the kubelet restarts
+// the pod. On HEAD 04b8774 this test fails to compile because runWatchConfig
+// and watchFatal do not exist; the old code silently returns from the goroutine,
+// leaving the pod excluded from rotation with no recovery path.
+func TestWatchFatal_CalledOnBadPath(t *testing.T) {
+	var called atomic.Bool
+	old := watchFatal
+	defer func() { watchFatal = old }()
+	watchFatal = func() { called.Store(true) }
+
+	// nosuchdir is never created, so watcher.Add fails and watchConfig returns.
+	dir := filepath.Join(t.TempDir(), "nosuchdir")
+	path := filepath.Join(dir, "config.yaml")
+
+	var watcherAlive atomic.Bool
+	// Call runWatchConfig synchronously; the watchFatal stub returns normally
+	// so runWatchConfig returns after recording the call.
+	runWatchConfig(
+		&applyState{fn: func(*agentconfig.Document) error { return nil }},
+		func() (*agentconfig.Document, error) { return testDoc(), nil },
+		path,
+		&watcherAlive,
+	)
+
+	if !called.Load() {
+		t.Fatal("watchFatal was not called after watcher.Add failed on a nonexistent directory")
 	}
 }
