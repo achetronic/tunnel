@@ -73,7 +73,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: manifests generate fmt vet setup-envtest ## Run tests.
+test: manifests generate fmt vet setup-envtest envoy ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
 .PHONY: test-race
@@ -233,10 +233,13 @@ KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+ENVOY ?= $(LOCALBIN)/envoy
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.8.1
 CONTROLLER_TOOLS_VERSION ?= v0.20.1
+# keep in lockstep with controller.DefaultEnvoyVersion
+ENVOY_VERSION ?= 1.29.3
 
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell v='$(call gomodver,sigs.k8s.io/controller-runtime)'; \
@@ -281,6 +284,33 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 		$(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
 		mv -f $(LOCALBIN)/golangci-lint-custom $(GOLANGCI_LINT); \
 	} || true
+
+.PHONY: envoy download-envoy
+download-envoy: envoy ## Alias for envoy download.
+envoy: $(LOCALBIN) ## Download envoy locally if necessary.
+	@OS=$$(uname -s 2>/dev/null || echo "Unknown") ; \
+	ARCH_RAW=$$(uname -m 2>/dev/null || echo "Unknown") ; \
+	if [ "$$OS" != "Linux" ]; then \
+		echo "envoy validation tests are linux-only; skipping download on $$OS" ; \
+		exit 0 ; \
+	fi ; \
+	case "$$ARCH_RAW" in \
+		x86_64|amd64) ARCH="x86_64" ;; \
+		aarch64|arm64) ARCH="aarch_64" ;; \
+		*) echo "Unsupported architecture: $$ARCH_RAW" ; exit 1 ;; \
+	esac ; \
+	TARGET_BIN="$(LOCALBIN)/envoy-$(ENVOY_VERSION)" ; \
+	if [ ! -f "$$TARGET_BIN" ]; then \
+		echo "Downloading envoy $(ENVOY_VERSION) for linux-$$ARCH..." ; \
+		curl -fL "https://github.com/envoyproxy/envoy/releases/download/v$(ENVOY_VERSION)/envoy-$(ENVOY_VERSION)-linux-$$ARCH" -o "$$TARGET_BIN" || { \
+			echo "Failed to download envoy binary" ; exit 1 ; \
+		} ; \
+		chmod +x "$$TARGET_BIN" ; \
+	fi ; \
+	if [ "$$(readlink -- "$(ENVOY)" 2>/dev/null)" != "$$TARGET_BIN" ] && [ "$$(realpath "$(ENVOY)" 2>/dev/null)" != "$$(realpath "$$TARGET_BIN")" ]; then \
+		rm -f "$(ENVOY)" ; \
+		ln -sf "$$(realpath "$$TARGET_BIN")" "$(ENVOY)" ; \
+	fi
 
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary

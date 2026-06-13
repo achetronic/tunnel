@@ -88,6 +88,7 @@ const (
 	// is not given an explicit --envoy-version. It is the single source of the
 	// default, reused as the flag default in cmd/main.go.
 	// Ref: https://github.com/envoyproxy/envoy/releases
+	// Keep in lockstep with ENVOY_VERSION in Makefile.
 	DefaultEnvoyVersion = "1.29.3"
 
 	// DefaultTunnelctlDir is the directory the operator reads the static tunnelctl
