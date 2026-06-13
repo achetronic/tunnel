@@ -334,12 +334,26 @@ var reservedPorts = map[int32]string{
 	metricsPort:         "Envoy admin/metrics",
 }
 
+// portProtocolKey defines a composite key combining a transmission protocol
+// and a target listen port to check for socket collisions.
+type portProtocolKey struct {
+	protocol string
+	port     int32
+}
+
+// portOwner holds the owning Kubernetes PortBinding resource identifier
+// and the individual binding definition name to assist in precise conflict reporting.
+type portOwner struct {
+	owner       string
+	bindingName string
+}
+
 // collectBindingDefs flattens every PortBindingDefinition across the active
 // PortBindings, rejecting collisions with the tunnel listenPort, the reserved
 // infrastructure ports and duplicate listen ports, and returns them sorted by
 // ListenPort for deterministic output.
 func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1alpha1.PortBindingDefinition, error) {
-	usedPorts := make(map[int32]string)
+	usedPorts := make(map[portProtocolKey]portOwner)
 	usedNames := make(map[string]string)
 	var allDefs []v1alpha1.PortBindingDefinition
 	for _, pb := range bindings {
@@ -350,8 +364,11 @@ func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1
 			if owner, reserved := reservedPorts[def.ListenPort]; reserved {
 				return nil, fmt.Errorf("binding %s uses port %d, reserved for the %s", def.Name, def.ListenPort, owner)
 			}
-			if existing, ok := usedPorts[def.ListenPort]; ok {
-				return nil, fmt.Errorf("port conflict on %d between %s and %s", def.ListenPort, existing, def.Name)
+			owner := pb.Namespace + "/" + pb.Name
+			key := portProtocolKey{protocol: def.Protocol, port: def.ListenPort}
+			if existing, ok := usedPorts[key]; ok {
+				return nil, fmt.Errorf("port conflict on %s/%d between PortBinding %s (binding %s) and %s (binding %s)",
+					def.Protocol, def.ListenPort, existing.owner, existing.bindingName, owner, def.Name)
 			}
 			// Binding names must be unique across every PortBinding aggregated
 			// into this node's plan, not just within one CR: the name keys the
@@ -359,17 +376,22 @@ func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1
 			// document path on the VPS (duplicates silently serve one binding's
 			// certificate for the other). The CRD listMapKey only guards a
 			// single CR, so the cross-CR check lives here.
-			owner := pb.Namespace + "/" + pb.Name
 			if existing, ok := usedNames[def.Name]; ok {
 				return nil, fmt.Errorf("binding name %q used by both %s and %s", def.Name, existing, owner)
 			}
 			usedNames[def.Name] = owner
-			usedPorts[def.ListenPort] = def.Name
+			usedPorts[key] = portOwner{
+				owner:       owner,
+				bindingName: def.Name,
+			}
 			allDefs = append(allDefs, def)
 		}
 	}
 
 	sort.Slice(allDefs, func(i, j int) bool {
+		if allDefs[i].ListenPort == allDefs[j].ListenPort {
+			return allDefs[i].Protocol < allDefs[j].Protocol
+		}
 		return allDefs[i].ListenPort < allDefs[j].ListenPort
 	})
 	return allDefs, nil

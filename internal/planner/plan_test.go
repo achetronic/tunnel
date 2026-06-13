@@ -687,3 +687,189 @@ func TestBuildPlan_EmptyVPSPubKey(t *testing.T) {
 		t.Errorf("error = %q, want it to mention vpsPubKey", err.Error())
 	}
 }
+
+// TestBuildPlan_ProtocolAwarePortConflict checks that distinct protocol bindings
+// on the same port do not collide, while identical protocol bindings on the same
+// port are still rejected. It also checks that reserved ports are rejected regardless of protocol.
+func TestBuildPlan_ProtocolAwarePortConflict(t *testing.T) {
+	node := makeNode()
+	node.Spec.Address = testVPSAddress
+	keys := map[int32]string{0: "pub0", 1: "pub1"}
+
+	// Positive test: PortBinding with TCP/53 and UDP/53 on the same port should succeed.
+	bindingsPositive := []v1alpha1.PortBinding{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pb-tcp"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "dns-tcp",
+						Protocol:   "TCP",
+						ListenPort: 53,
+						Target: v1alpha1.BindingTarget{
+							Address: "1.1.1.1",
+							Port:    53,
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pb-udp"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "dns-udp",
+						Protocol:   "UDP",
+						ListenPort: 53,
+						Target: v1alpha1.BindingTarget{
+							Address: "8.8.8.8",
+							Port:    53,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	plan, err := BuildPlan(node, bindingsPositive, mockResolver{}, "priv", "pub", keys)
+	if err != nil {
+		t.Fatalf("expected BuildPlan to succeed for TCP/53 and UDP/53, got: %v", err)
+	}
+
+	// Verify we got no TLS materials.
+	if len(plan.TLSMaterials) != 0 {
+		t.Errorf("expected no TLS materials, got %d", len(plan.TLSMaterials))
+	}
+
+	// Verify the Envoy LDS and CDS contain both the TCP and UDP configurations.
+	// Since RenderEnvoyLDS renders to bytes, we search the YAML representation.
+	ldsYAML := string(plan.EnvoyLDS)
+	if !strings.Contains(ldsYAML, "listener_dns-tcp") || !strings.Contains(ldsYAML, "listener_dns-udp") {
+		t.Errorf("LDS is missing listeners, got:\n%s", ldsYAML)
+	}
+
+	cdsYAML := string(plan.EnvoyCDS)
+	if !strings.Contains(cdsYAML, "cluster_dns-tcp") || !strings.Contains(cdsYAML, "cluster_dns-udp") {
+		t.Errorf("CDS is missing clusters, got:\n%s", cdsYAML)
+	}
+
+	// Verify the uplink document has two nftables rules.
+	uplinkYAML := string(plan.UplinkDocument)
+	if !strings.Contains(uplinkYAML, "1.1.1.1") || !strings.Contains(uplinkYAML, "8.8.8.8") {
+		t.Errorf("Uplink document is missing rules, got:\n%s", uplinkYAML)
+	}
+
+	// Negative tests:
+	// 1. Two TCP/53 bindings are rejected.
+	bindingsDupTCP := []v1alpha1.PortBinding{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pb-tcp1"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "dns-tcp1",
+						Protocol:   "TCP",
+						ListenPort: 53,
+						Target: v1alpha1.BindingTarget{
+							Address: "1.1.1.1",
+							Port:    53,
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pb-tcp2"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "dns-tcp2",
+						Protocol:   "TCP",
+						ListenPort: 53,
+						Target: v1alpha1.BindingTarget{
+							Address: "8.8.8.8",
+							Port:    53,
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err = BuildPlan(node, bindingsDupTCP, mockResolver{}, "priv", "pub", keys)
+	if err == nil {
+		t.Error("expected BuildPlan to fail for duplicate TCP/53 bindings, but it succeeded")
+	} else if !strings.Contains(err.Error(), "port conflict on TCP/53") {
+		t.Errorf("expected TCP port conflict error, got: %v", err)
+	}
+
+	// 2. Two UDP/53 bindings are rejected.
+	bindingsDupUDP := []v1alpha1.PortBinding{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pb-udp1"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "dns-udp1",
+						Protocol:   "UDP",
+						ListenPort: 53,
+						Target: v1alpha1.BindingTarget{
+							Address: "1.1.1.1",
+							Port:    53,
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pb-udp2"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "dns-udp2",
+						Protocol:   "UDP",
+						ListenPort: 53,
+						Target: v1alpha1.BindingTarget{
+							Address: "8.8.8.8",
+							Port:    53,
+						},
+					},
+				},
+			},
+		},
+	}
+	_, err = BuildPlan(node, bindingsDupUDP, mockResolver{}, "priv", "pub", keys)
+	if err == nil {
+		t.Error("expected BuildPlan to fail for duplicate UDP/53 bindings, but it succeeded")
+	} else if !strings.Contains(err.Error(), "port conflict on UDP/53") {
+		t.Errorf("expected UDP port conflict error, got: %v", err)
+	}
+
+	// 3. Reserved port 8080 is rejected for any protocol (TCP or UDP).
+	for _, proto := range []string{"TCP", "UDP"} {
+		bindingsReserved := []v1alpha1.PortBinding{
+			{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pb-reserved"},
+				Spec: v1alpha1.PortBindingSpec{
+					Bindings: []v1alpha1.PortBindingDefinition{
+						{
+							Name:       "test-reserved",
+							Protocol:   proto,
+							ListenPort: 8080,
+							Target: v1alpha1.BindingTarget{
+								Address: "10.0.0.1",
+								Port:    8080,
+							},
+						},
+					},
+				},
+			},
+		}
+		_, err = BuildPlan(node, bindingsReserved, mockResolver{}, "priv", "pub", keys)
+		if err == nil {
+			t.Errorf("expected BuildPlan to fail for reserved port 8080 with protocol %s", proto)
+		} else if !strings.Contains(err.Error(), "reserved for the uplink readiness endpoint") {
+			t.Errorf("expected reserved port error mentioning uplink readiness endpoint, got: %v", err)
+		}
+	}
+}

@@ -63,7 +63,7 @@ Credentials ALWAYS by `secretRef`, never inline in the CR.
 A PortBinding carries a list of `bindings`, each discriminated by `protocol` (`TCP`|`UDP`) with typed sub-structs `tcp` / `udp`, both optional (the operator/planner applies defaults if omitted: TCP `connectTimeout=5s`, `idleTimeout=3600s`; UDP `sessionTimeout=60s`).
 Validations:
 - Protocol/params coherence and "Target is exactly one of Service or Address" are enforced declaratively by CEL `XValidation` markers on the CRD (admission time).
-- Unique `listenPort` across ALL PortBindings referencing the same EdgeNode, `listenPort` != `tunnel.listenPort` of the referenced host, and `listenPort` not on a reserved infrastructure port (8080 uplink readiness, 9901 Envoy admin/metrics) are enforced at runtime inside `internal/planner.BuildPlan` during EdgeNode reconciliation (a conflict fails that EdgeNode's reconcile, not the PortBinding admission).
+- Unique `(protocol, listenPort)` pair across ALL PortBindings referencing the same EdgeNode (so the same port on TCP and UDP can coexist, since they are separate sockets), `listenPort` != `tunnel.listenPort` of the referenced host, and `listenPort` not on a reserved infrastructure port (8080 uplink readiness, 9901 Envoy admin/metrics, both protocol-agnostic) are enforced at runtime inside `internal/planner.BuildPlan` during EdgeNode reconciliation (a conflict fails that EdgeNode's reconcile, not the PortBinding admission).
 
 #### 3.2.1 TLS at the edge (optional, TCP only)
 A TCP binding may carry an optional `tls` block: `{ mode, secretRef }`. A single `secretRef` points at a standard `kubernetes.io/tls` Secret; the `mode` decides which keys are read from inside it:
@@ -101,7 +101,7 @@ PortBindings have their own reconciler with its own lifecycle; the two controlle
 ### 4.3 Uplink
 The uplink image is the generic `tunnelctl` agent (same binary the edge uses), distroless and run as **root** (`gcr.io/distroless/static:latest`, not `:nonroot`): creating the WireGuard link and programming nftables via netlink needs an effective `CAP_NET_ADMIN`, which a non-root uid does not get even in a privileged pod. There is no uplink-specific binary.
 - The StatefulSet runs `tunnelctl run --config /etc/tunnel/uplink.json --transforms /etc/tunnelctl/uplink.transforms.yaml`. The config is the shared desired-state template from the mounted ConfigMap (same for every replica); the transforms are a baked-in CEL document that fills each replica's identity at runtime (`internal/configtransform`): it parses the ordinal from `POD_NAME`, derives the tunnel address with `cidrHost(network, 2 + ordinal)`, and reads the private key from the per-ordinal file under `KEYS_DIR` (the mounted keys Secret).
-- `tunnelctl run` applies WireGuard + nftables natively, watches the ConfigMap and re-applies (re-running the transforms, so identity stays consistent) on change, and serves the readiness endpoint on `:8080`.
+- `tunnelctl run` applies WireGuard + nftables natively, watches the ConfigMap and re-applies (re-running the transforms, so identity stays consistent) on change, and serves the readiness endpoint on `:8080`. Readiness reports 200 only once a full apply (WireGuard AND nftables) has succeeded, the config watcher is active, and the WireGuard handshake is fresh, so a replica with WireGuard up but no DNAT rules is never put in rotation. If the config watcher cannot be maintained (inotify limits exhausted), the agent exits so the kubelet restarts the pod instead of running blind with stale config.
 
 ---
 
