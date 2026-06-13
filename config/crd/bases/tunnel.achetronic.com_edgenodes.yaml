@@ -1139,8 +1139,10 @@ spec:
                     default: 1
                     description: |-
                       Replicas is the number of active-active uplink peers. Each replica is an
-                      independent WireGuard peer claiming its own /32.
+                      independent WireGuard peer claiming its own /32. The value is capped at 253
+                      because this is the usable host capacity of the default /24 tunnel network.
                     format: int32
+                    maximum: 253
                     minimum: 1
                     type: integer
                   resources:

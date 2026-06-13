@@ -102,9 +102,11 @@ type UplinkSpec struct {
 	Namespace string `json:"namespace,omitempty"`
 
 	// Replicas is the number of active-active uplink peers. Each replica is an
-	// independent WireGuard peer claiming its own /32.
+	// independent WireGuard peer claiming its own /32. The value is capped at 253
+	// because this is the usable host capacity of the default /24 tunnel network.
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=253
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 
