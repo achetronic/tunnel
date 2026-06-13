@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -137,7 +138,8 @@ func TestReadyHandler_WatcherNotActive(t *testing.T) {
 		return testDoc(), nil
 	}
 
-	handler := readyHandler(load, &watcherAlive, &succeeded)
+	var draining atomic.Bool
+	handler := readyHandler(load, &watcherAlive, &succeeded, &draining)
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	rr := httptest.NewRecorder()
 
@@ -181,7 +183,8 @@ func TestReadyHandler_Healthy(t *testing.T) {
 		}, nil
 	}
 
-	handler := readyHandler(load, &watcherAlive, &succeeded)
+	var draining atomic.Bool
+	handler := readyHandler(load, &watcherAlive, &succeeded, &draining)
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	rr := httptest.NewRecorder()
 
@@ -226,7 +229,8 @@ func TestReadyHandler_SucceededFalse(t *testing.T) {
 		}, nil
 	}
 
-	handler := readyHandler(load, &watcherAlive, &succeeded)
+	var draining atomic.Bool
+	handler := readyHandler(load, &watcherAlive, &succeeded, &draining)
 	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
 	rr := httptest.NewRecorder()
 
@@ -270,5 +274,54 @@ func TestWatchFatal_CalledOnBadPath(t *testing.T) {
 
 	if !called.Load() {
 		t.Fatal("watchFatal was not called after watcher.Add failed on a nonexistent directory")
+	}
+}
+
+// TestReadyHandler_Draining verifies that once the draining flag is set the
+// readiness handler returns 503 even when the watcher is alive, the initial
+// apply succeeded, and the WireGuard handshake is fresh. This is the SIGTERM
+// gate that lets Envoy eject the replica before the link is torn down.
+func TestReadyHandler_Draining(t *testing.T) {
+	var watcherAlive, succeeded, draining atomic.Bool
+	watcherAlive.Store(true)
+	succeeded.Store(true)
+	draining.Store(true)
+
+	oldStatus := wgStatus
+	defer func() { wgStatus = oldStatus }()
+	wgStatus = func(agentconfig.WireGuardConfig) (wg.State, error) {
+		return wg.State{Exists: true, Up: true, Peers: []wg.PeerState{{LastHandshake: time.Now()}}}, nil
+	}
+
+	handler := readyHandler(func() (*agentconfig.Document, error) { return testDoc(), nil },
+		&watcherAlive, &succeeded, &draining)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/ready", nil))
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("draining pod must report 503, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "draining") {
+		t.Fatalf("expected a draining body, got %q", rr.Body.String())
+	}
+}
+
+// TestDrainAndShutdown_Ordering verifies the drain helper sets the draining flag
+// (so readiness flips to 503) BEFORE it waits the drain window and shuts the
+// server down, with an injected sleep observing the flag state mid-drain.
+func TestDrainAndShutdown_Ordering(t *testing.T) {
+	var draining atomic.Bool
+	srv := &http.Server{Addr: "127.0.0.1:0"}
+
+	flagSetDuringSleep := false
+	sleep := func(time.Duration) { flagSetDuringSleep = draining.Load() }
+
+	drainAndShutdown(srv, &draining, sleep)
+
+	if !flagSetDuringSleep {
+		t.Fatal("draining flag must be set before the drain window sleep")
+	}
+	if !draining.Load() {
+		t.Fatal("draining flag must remain set after drain")
 	}
 }

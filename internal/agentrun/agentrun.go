@@ -8,6 +8,7 @@ package agentrun
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -131,8 +132,13 @@ func Run(ctx context.Context, load Loader, watchPath, healthAddr string) error {
 	// kubelet can restart the pod instead of leaving it silently broken.
 	go runWatchConfig(st, load, watchPath, &watcherAlive)
 
+	// draining flips to true on shutdown (SIGTERM via ctx) so readiness reports
+	// 503 and Envoy ejects this replica from rotation before the link is torn
+	// down, instead of resetting in-flight connections on an abrupt exit.
+	var draining atomic.Bool
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ready", readyHandler(load, &watcherAlive, &st.succeeded))
+	mux.HandleFunc("/ready", readyHandler(load, &watcherAlive, &st.succeeded, &draining))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	srv := &http.Server{
@@ -144,10 +150,52 @@ func Run(ctx context.Context, load Loader, watchPath, healthAddr string) error {
 		IdleTimeout:       60 * time.Second,
 	}
 	slog.Info("agent run listening", "addr", healthAddr, "config", watchPath)
-	if err := srv.ListenAndServe(); err != nil {
-		return fmt.Errorf("readiness server: %w", err)
+
+	// Serve in the background so the main goroutine can react to ctx
+	// cancellation (SIGTERM) and drain gracefully.
+	serveErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- fmt.Errorf("readiness server: %w", err)
+			return
+		}
+		serveErr <- nil
+	}()
+
+	select {
+	case err := <-serveErr:
+		return err
+	case <-ctx.Done():
+		drainAndShutdown(srv, &draining, time.Sleep)
+		<-serveErr
+		return nil
 	}
-	return nil
+}
+
+// Backoff and drain timing constants.
+const (
+	// drainWindow is how long readiness reports 503 before the readiness server
+	// is shut down on SIGTERM, giving Envoy's active health checks time to
+	// observe the failure and eject this replica so new connections stop
+	// arriving while in-flight ones keep working.
+	drainWindow = 15 * time.Second
+	// shutdownTimeout bounds the graceful HTTP server shutdown after the drain
+	// window so a stuck connection cannot block the exit indefinitely.
+	shutdownTimeout = 5 * time.Second
+)
+
+// drainAndShutdown flips the draining flag so readiness returns 503, waits the
+// drain window for Envoy to eject this replica, then gracefully shuts the
+// readiness server down. sleep is injected so tests can shrink the window.
+func drainAndShutdown(srv *http.Server, draining *atomic.Bool, sleep func(time.Duration)) {
+	draining.Store(true)
+	slog.Info("draining: reporting NotReady so Envoy ejects this replica", "window", drainWindow)
+	sleep(drainWindow)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("readiness server shutdown returned an error", "error", err)
+	}
 }
 
 // retryInitialApply re-attempts the initial apply with exponential backoff
@@ -257,13 +305,19 @@ func runWatchConfig(st *applyState, load Loader, path string, watcherAlive *atom
 var wgStatus = wg.Status
 
 // readyHandler returns an HTTP handler that reports node readiness. The handler
-// returns 503 when the config watcher is not active (covering the startup window
-// and the brief period before process exit on watcher death), when the initial
-// full apply (WireGuard and nftables) has not yet succeeded, or when the
-// WireGuard handshake is not fresh. All three conditions must be satisfied for
-// the handler to return 200.
-func readyHandler(load Loader, watcherAlive *atomic.Bool, succeeded *atomic.Bool) http.HandlerFunc {
+// returns 503 when the pod is draining (SIGTERM received), when the config
+// watcher is not active (covering the startup window and the brief period before
+// process exit on watcher death), when the initial full apply (WireGuard and
+// nftables) has not yet succeeded, or when the WireGuard handshake is not fresh.
+// All conditions must hold for the handler to return 200.
+func readyHandler(load Loader, watcherAlive *atomic.Bool, succeeded *atomic.Bool, draining *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		// Draining is checked first: on SIGTERM the pod must report NotReady
+		// immediately so Envoy ejects it before the link is torn down.
+		if draining.Load() {
+			http.Error(w, "draining", http.StatusServiceUnavailable)
+			return
+		}
 		if !watcherAlive.Load() {
 			http.Error(w, "config watcher is not active", http.StatusServiceUnavailable)
 			return

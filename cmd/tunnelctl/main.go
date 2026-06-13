@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/achetronic/tunnel/internal/agentconfig"
@@ -176,13 +178,17 @@ func cmdStatus(args []string) error {
 }
 
 // cmdRun applies the document, then watches it and serves a readiness endpoint,
-// re-applying whenever the config changes.
+// re-applying whenever the config changes. It binds a context to SIGTERM and
+// SIGINT so a pod shutdown (rolling update, drain) triggers a graceful drain in
+// agentrun.Run instead of an abrupt exit that resets in-flight connections.
 func cmdRun(args []string) error {
 	cfg, tr, healthAddr, err := parseFlags("run", args)
 	if err != nil {
 		return err
 	}
-	return agentrun.Run(context.Background(), func() (*agentconfig.Document, error) {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	return agentrun.Run(ctx, func() (*agentconfig.Document, error) {
 		return loadConfig(cfg, tr)
 	}, cfg, healthAddr)
 }
