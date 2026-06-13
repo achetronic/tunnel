@@ -162,7 +162,7 @@ func (e *SSHExecutor) Run(ctx context.Context, cmd string) (out string, err erro
 	case <-ctx.Done():
 		// Closing the session unblocks the goroutine's session.Run.
 		_ = session.Close()
-		<-done
+		e.awaitOrTeardown(done)
 		return buf.String(), fmt.Errorf("command %q cancelled: %w", cmd, ctx.Err())
 	case runErr := <-done:
 		if runErr != nil {
@@ -221,7 +221,7 @@ func (e *SSHExecutor) Put(ctx context.Context, path string, content []byte) (err
 	select {
 	case <-ctx.Done():
 		_ = session.Close()
-		<-copyErr
+		e.awaitOrTeardown(copyErr)
 		return fmt.Errorf("write to %s cancelled: %w", path, ctx.Err())
 	case cerr := <-copyErr:
 		if cerr != nil {
@@ -238,7 +238,7 @@ func (e *SSHExecutor) Put(ctx context.Context, path string, content []byte) (err
 	select {
 	case <-ctx.Done():
 		_ = session.Close()
-		<-waitErr
+		e.awaitOrTeardown(waitErr)
 		return fmt.Errorf("write to %s cancelled: %w", path, ctx.Err())
 	case werr := <-waitErr:
 		if werr != nil {
@@ -256,4 +256,26 @@ func (e *SSHExecutor) withTimeout(ctx context.Context) (context.Context, context
 		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, e.commandTimeout)
+}
+
+// teardownGrace bounds how long a cancelled command waits for its session
+// goroutine after session.Close. Close only sends MSG_CHANNEL_CLOSE over the
+// wire; against a silently dead peer (a NAT-dropped connection with no RST)
+// the mux read otherwise blocks until the kernel TCP retransmission timeout,
+// holding the caller far beyond its context deadline.
+const teardownGrace = 10 * time.Second
+
+// awaitOrTeardown waits for the session goroutine to finish after a
+// cancellation. If it does not finish within teardownGrace, the whole client
+// connection is closed to tear down the SSH mux, which unblocks every pending
+// read and write. The forced close sacrifices the executor for further use,
+// which is acceptable because the controller builds one executor per reconcile
+// and closes it afterwards.
+func (e *SSHExecutor) awaitOrTeardown(ch <-chan error) {
+	select {
+	case <-ch:
+	case <-time.After(teardownGrace):
+		_ = e.Close()
+		<-ch
+	}
 }

@@ -2,10 +2,14 @@ package agentrun
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/achetronic/tunnel/internal/agentconfig"
+	"github.com/achetronic/tunnel/internal/wg"
 )
 
 // testDoc returns a minimal document for exercising the retry loop. The fake
@@ -116,5 +120,72 @@ func TestRetryInitialApply_BackoffCaps(t *testing.T) {
 		if sleeps[i] > initialApplyBackoffCap {
 			t.Errorf("backoff exceeded cap: %v", sleeps[i])
 		}
+	}
+}
+
+// TestReadyHandler_WatcherNotActive verifies that the readiness handler returns
+// a Service Unavailable status when the config watcher is not active.
+func TestReadyHandler_WatcherNotActive(t *testing.T) {
+	var watcherAlive atomic.Bool
+	watcherAlive.Store(false)
+
+	load := func() (*agentconfig.Document, error) {
+		return testDoc(), nil
+	}
+
+	handler := readyHandler(load, &watcherAlive)
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected status %d, got %d", http.StatusServiceUnavailable, rr.Code)
+	}
+
+	wantBody := "config watcher is not active\n"
+	if rr.Body.String() != wantBody {
+		t.Errorf("expected body %q, got %q", wantBody, rr.Body.String())
+	}
+}
+
+// TestReadyHandler_Healthy verifies that the readiness handler returns OK when
+// the config watcher is active and the WireGuard interface is healthy.
+func TestReadyHandler_Healthy(t *testing.T) {
+	var watcherAlive atomic.Bool
+	watcherAlive.Store(true)
+
+	load := func() (*agentconfig.Document, error) {
+		return testDoc(), nil
+	}
+
+	// Override wgStatus to return a healthy state
+	oldStatus := wgStatus
+	defer func() { wgStatus = oldStatus }()
+	wgStatus = func(cfg agentconfig.WireGuardConfig) (wg.State, error) {
+		return wg.State{
+			Exists: true,
+			Up:     true,
+			Peers: []wg.PeerState{
+				{
+					LastHandshake: time.Now(),
+				},
+			},
+		}, nil
+	}
+
+	handler := readyHandler(load, &watcherAlive)
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected status %d, got %d", http.StatusOK, rr.Code)
+	}
+
+	wantBody := "OK\n"
+	if rr.Body.String() != wantBody {
+		t.Errorf("expected body %q, got %q", wantBody, rr.Body.String())
 	}
 }

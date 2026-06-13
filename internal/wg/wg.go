@@ -1,6 +1,7 @@
 package wg
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -182,12 +183,18 @@ func staleRoutes(cfg agentconfig.WireGuardConfig, installed []netlink.Route) []n
 
 // Status reports the observed state of the device. A missing link yields
 // State{Exists: false} with a nil error, since "not applied yet" is a valid
-// observation rather than a failure.
+// observation rather than a failure. Any other netlink error (broken socket,
+// missing privileges, unavailable subsystem) is propagated so callers can
+// distinguish a genuinely absent interface from an inability to look at all.
 func Status(cfg agentconfig.WireGuardConfig) (State, error) {
 	name := cfg.Interface.Name
 	link, err := netlink.LinkByName(name)
 	if err != nil {
-		return State{Exists: false}, nil
+		var notFound netlink.LinkNotFoundError
+		if errors.As(err, &notFound) {
+			return State{Exists: false}, nil
+		}
+		return State{}, fmt.Errorf("look up link %q: %w", name, err)
 	}
 	state := State{
 		Exists: true,

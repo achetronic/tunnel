@@ -125,10 +125,11 @@ func Run(ctx context.Context, load Loader, watchPath, healthAddr string) error {
 		slog.Info("applied desired state", "interface", doc.WireGuard.Interface.Name)
 	}
 
-	go watchConfig(st, load, watchPath)
+	var watcherAlive atomic.Bool
+	go watchConfig(st, load, watchPath, &watcherAlive)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ready", readyHandler(load))
+	mux.HandleFunc("/ready", readyHandler(load, &watcherAlive))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	srv := &http.Server{
@@ -180,7 +181,9 @@ func retryInitialApply(st *applyState, load Loader, sleep func(time.Duration)) {
 // change. Kubernetes swaps a mounted ConfigMap through a "..data" symlink, so
 // both that and the file itself are treated as triggers. Apply failures are
 // logged, not fatal, so a transient bad config can recover when it is fixed.
-func watchConfig(st *applyState, load Loader, path string) {
+func watchConfig(st *applyState, load Loader, path string, watcherAlive *atomic.Bool) {
+	defer watcherAlive.Store(false)
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		slog.Error("failed to create config watcher", "error", err)
@@ -193,6 +196,7 @@ func watchConfig(st *applyState, load Loader, path string) {
 		slog.Error("failed to watch config directory", "dir", dir, "error", err)
 		return
 	}
+	watcherAlive.Store(true)
 	base := filepath.Base(path)
 	for {
 		select {
@@ -225,16 +229,25 @@ func watchConfig(st *applyState, load Loader, path string) {
 	}
 }
 
+// wgStatus retrieves the WireGuard interface state. It is a package variable to
+// allow tests to override the status retrieval with a mock function.
+var wgStatus = wg.Status
+
 // readyHandler returns an HTTP handler that reports node readiness, reusing the
 // same status core as the status subcommand.
-func readyHandler(load Loader) http.HandlerFunc {
+// The handler treats not yet started watchers as not ready.
+func readyHandler(load Loader, watcherAlive *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
+		if !watcherAlive.Load() {
+			http.Error(w, "config watcher is not active", http.StatusServiceUnavailable)
+			return
+		}
 		doc, err := load()
 		if err != nil {
 			http.Error(w, fmt.Sprintf("config error: %v", err), http.StatusServiceUnavailable)
 			return
 		}
-		state, err := wg.Status(doc.WireGuard)
+		state, err := wgStatus(doc.WireGuard)
 		if err != nil {
 			http.Error(w, fmt.Sprintf("status error: %v", err), http.StatusServiceUnavailable)
 			return

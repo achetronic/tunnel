@@ -67,7 +67,7 @@ func TestEnroll_Idempotent(t *testing.T) {
 			return "", nil
 		}
 		if strings.Contains(cmd, "uname -m") {
-			return "x86_64\n", nil
+			return unameX8664, nil
 		}
 		if strings.Contains(cmd, "test -x "+tunnelctlBinPath) {
 			// Binary already present, so a version-matching reconcile skips install.
@@ -130,9 +130,9 @@ func TestEnroll_Idempotent(t *testing.T) {
 
 	runsAfter := len(fake.Runs)
 	// A no-op enroll only reads the state (cat state.json), runs the cheap architecture detection
-	// (uname -m), and runs the two CheckHealth probes (is-active envoy, tunnelctl status) before short-circuiting.
-	if runsAfter != runsBefore+4 {
-		t.Fatalf("expected 4 runs (cat state, uname -m, 2x CheckHealth), got %d extra runs", runsAfter-runsBefore)
+	// (uname -m), runs the two CheckHealth probes (is-active envoy, tunnelctl status), and runs the sweep command before short-circuiting.
+	if runsAfter != runsBefore+5 {
+		t.Fatalf("expected 5 runs (cat state, uname -m, 2x CheckHealth, sweep), got %d extra runs", runsAfter-runsBefore)
 	}
 }
 
@@ -151,7 +151,7 @@ func TestEnroll_PartialFail(t *testing.T) {
 			return "", nil
 		}
 		if strings.Contains(cmd, "uname -m") {
-			return "x86_64\n", nil
+			return unameX8664, nil
 		}
 		if strings.Contains(cmd, "cat /etc/tunnel-operator/state.json") {
 			if _, ok := fake.Files["/etc/tunnel-operator/state.json"]; !ok {
@@ -592,7 +592,7 @@ func TestEnroll_EnvoyVersionMismatch_InstallsAndRestarts(t *testing.T) {
 	joined := strings.Join(fake.Runs, "\n")
 
 	// Assert the install command runs (curl download URL with v1.30.2/envoy-1.30.2).
-	if !strings.Contains(joined, "curl -sL https://github.com/envoyproxy/envoy/releases/download/v1.30.2/envoy-1.30.2-linux-x86_64") {
+	if !strings.Contains(joined, "curl -fsL https://github.com/envoyproxy/envoy/releases/download/v1.30.2/envoy-1.30.2-linux-x86_64") {
 		t.Error("expected Envoy download command to run, but it did not")
 	}
 
@@ -765,5 +765,104 @@ func TestInstallEnvoyBinary_AcceptsSemver(t *testing.T) {
 	}
 	if len(fake.Runs) == 0 || fake.Runs[0] != "uname -m" {
 		t.Errorf("expected the arch probe to run first, got %v", fake.Runs)
+	}
+}
+
+// TestEnroll_SweepStaleTempFiles verifies that a sweep command is issued early
+// in the enrollment flow to clean up any temporary files left behind.
+func TestEnroll_SweepStaleTempFiles(t *testing.T) {
+	fake := sshexec.NewFakeExecutor()
+	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
+		if strings.Contains(cmd, "uname -m") {
+			return unameX8664, nil
+		}
+		if strings.Contains(cmd, "tunnelctl status") {
+			return relayStatusJSON, nil
+		}
+		if strings.Contains(cmd, "systemctl is-active") {
+			return activeServiceLine, nil
+		}
+		return "", nil
+	}
+
+	plan := &planner.Plan{
+		RelayDocument:     []byte(`{"version":1}`),
+		EnvoyLDS:          []byte("lds"),
+		EnvoyCDS:          []byte("cds"),
+		RelayDocumentHash: "hash1",
+		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
+		EnvoyLDSHash:      "hash2",
+		EnvoyCDSHash:      "hash3",
+		RelayIP:           "10.200.0.1",
+	}
+
+	_, err := Enroll(context.Background(), fake, plan, nil)
+	if err != nil {
+		t.Fatalf("enroll failed: %v", err)
+	}
+
+	var foundSweep bool
+	for _, cmd := range fake.Runs {
+		if strings.Contains(cmd, "find") && strings.Contains(cmd, ".tunnel.*") {
+			foundSweep = true
+			break
+		}
+	}
+	if !foundSweep {
+		t.Error("expected a sweep command to be issued, but none was found")
+	}
+}
+
+// TestEnroll_CorruptedStateReEnrolls asserts that if state.json is corrupted
+// and fails parsing, the enroll process recovers gracefully by treating it as
+// an empty state and performing a full re-enroll rather than failing.
+func TestEnroll_CorruptedStateReEnrolls(t *testing.T) {
+	fake := sshexec.NewFakeExecutor()
+	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
+		if strings.Contains(cmd, "uname -m") {
+			return unameX8664, nil
+		}
+		if strings.Contains(cmd, "cat /etc/tunnel-operator/state.json") {
+			// Return a corrupted JSON string.
+			return "{corrupted-json", nil
+		}
+		if strings.Contains(cmd, "tunnelctl status") {
+			return relayStatusJSON, nil
+		}
+		if strings.Contains(cmd, "systemctl is-active") {
+			return activeServiceLine, nil
+		}
+		return "", nil
+	}
+
+	plan := &planner.Plan{
+		RelayDocument:     []byte(`{"version":1}`),
+		EnvoyLDS:          []byte("lds"),
+		EnvoyCDS:          []byte("cds"),
+		RelayDocumentHash: "hash1",
+		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
+		EnvoyLDSHash:      "hash2",
+		EnvoyCDSHash:      "hash3",
+		RelayIP:           "10.200.0.1",
+	}
+
+	_, err := Enroll(context.Background(), fake, plan, nil)
+	if err != nil {
+		t.Fatalf("enroll failed on corrupted state: %v", err)
+	}
+
+	// Verify that we actually did write-related actions (e.g., installTunnelctl, etc.),
+	// which indicates a full re-enroll was performed instead of early-exiting.
+	var wroteState bool
+	for file := range fake.Files {
+		if strings.Contains(file, "state.json") {
+			wroteState = true
+			break
+		}
+	}
+	if !wroteState {
+		t.Error("expected state.json to be written during full re-enroll, but it was not")
 	}
 }

@@ -26,7 +26,7 @@ func tlsTestFiles() []TLSFile {
 func TestApplyTLSFiles_WritesAtomically(t *testing.T) {
 	fake := sshexec.NewFakeExecutor()
 	files := tlsTestFiles()
-	hash := hashTLSFiles(files)
+	hash := HashTLSFiles(files)
 	state := &State{}
 
 	wrote, err := applyTLSFiles(context.Background(), fake, files, hash, state)
@@ -65,7 +65,7 @@ func TestApplyTLSFiles_WritesAtomically(t *testing.T) {
 // is a no-op that neither reports a write nor issues new commands.
 func TestApplyTLSFiles_Idempotent(t *testing.T) {
 	files := tlsTestFiles()
-	hash := hashTLSFiles(files)
+	hash := HashTLSFiles(files)
 	state := &State{TLSHash: hash}
 
 	fake := sshexec.NewFakeExecutor()
@@ -215,14 +215,14 @@ func TestApplyTLSFiles_PrunesAllWhenEmpty(t *testing.T) {
 	}
 
 	state := &State{TLSHash: "had-tls"}
-	wrote, err := applyTLSFiles(context.Background(), fake, nil, hashTLSFiles(nil), state)
+	wrote, err := applyTLSFiles(context.Background(), fake, nil, HashTLSFiles(nil), state)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if wrote {
 		t.Fatal("an empty desired set must not report a write")
 	}
-	if state.TLSHash != hashTLSFiles(nil) {
+	if state.TLSHash != HashTLSFiles(nil) {
 		t.Fatalf("state TLSHash not updated to the empty hash: got %q", state.TLSHash)
 	}
 	if !strings.Contains(strings.Join(fake.Runs, "\n"), "rm -f /etc/envoy/tls/web.sds.yaml") {
@@ -241,13 +241,13 @@ func TestHashTLSFiles_DeterministicAndOrderIndependent(t *testing.T) {
 		{Path: "/etc/envoy/tls/b.crt", Content: []byte("B")},
 		{Path: "/etc/envoy/tls/a.crt", Content: []byte("A")},
 	}
-	if hashTLSFiles(a) != hashTLSFiles(b) {
+	if HashTLSFiles(a) != HashTLSFiles(b) {
 		t.Fatal("hash must be independent of slice order")
 	}
-	if hashTLSFiles(nil) != hashTLSFiles([]TLSFile{}) {
+	if HashTLSFiles(nil) != HashTLSFiles([]TLSFile{}) {
 		t.Fatal("nil and empty slice must hash equally")
 	}
-	if hashTLSFiles(a) == hashTLSFiles(nil) {
+	if HashTLSFiles(a) == HashTLSFiles(nil) {
 		t.Fatal("non-empty material must not hash like the empty input")
 	}
 }

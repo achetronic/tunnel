@@ -63,7 +63,13 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 		return false, fmt.Errorf("failed to check VPS health before enrolling: %w", healthErr)
 	}
 
-	tlsHash := hashTLSFiles(tlsFiles)
+	// Clean up stale temporary files from interrupted transfers in designated directories.
+	sweepCmd := "find /usr/local/bin /etc/tunnel-operator /etc/envoy /etc/envoy/tls -maxdepth 1 -name '.tunnel.*' -delete 2>/dev/null || true"
+	if _, err := exec.Run(ctx, sweepCmd); err != nil {
+		slog.Warn("enroll: failed to sweep stale temporary files", "error", err)
+	}
+
+	tlsHash := HashTLSFiles(tlsFiles)
 
 	bin, tunnelctlHash, err := resolveTunnelctlBinary(ctx, exec, plan.TunnelctlDir)
 	if err != nil {
@@ -236,7 +242,7 @@ func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version stri
 	}
 
 	downloadCmd := fmt.Sprintf(
-		"curl -sL %s -o /tmp/envoy && chmod +x /tmp/envoy && mv /tmp/envoy /usr/local/bin/envoy",
+		"curl -fsL %s -o /tmp/envoy && chmod +x /tmp/envoy && mv /tmp/envoy /usr/local/bin/envoy",
 		downloadURL,
 	)
 
@@ -486,7 +492,8 @@ func readState(ctx context.Context, exec sshexec.Executor) (*State, error) {
 	}
 	var st State
 	if err := json.Unmarshal([]byte(out), &st); err != nil {
-		return nil, fmt.Errorf("failed to parse state.json: %w", err)
+		slog.Warn("enroll: failed to parse state.json, treating as empty state", "error", err)
+		return &State{}, nil
 	}
 	return &st, nil
 }
@@ -598,11 +605,11 @@ func pruneTLSFiles(ctx context.Context, exec sshexec.Executor, desired []TLSFile
 	return nil
 }
 
-// hashTLSFiles returns a deterministic hex-encoded SHA-256 hash of all TLS
-// file paths and their contents. Files are sorted by path before hashing so
+// HashTLSFiles returns a deterministic hex-encoded SHA-256 hash of all TLS
+// file paths and their contents. Files are sorted by path for determinism so
 // the result is independent of slice order. An empty or nil slice returns the
 // hash of an empty input.
-func hashTLSFiles(files []TLSFile) string {
+func HashTLSFiles(files []TLSFile) string {
 	if len(files) == 0 {
 		return fmt.Sprintf("%x", sha256.Sum256(nil))
 	}
