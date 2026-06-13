@@ -2,7 +2,7 @@ resources:
   - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
     name: cluster_tcp_bind
     connect_timeout: 5s
-    type: STRICT_DNS
+    type: STATIC
     lb_policy: ROUND_ROBIN
     health_checks:
       - timeout: 2s
@@ -11,6 +11,10 @@ resources:
         healthy_threshold: 2
         http_health_check:
           path: /ready
+        transport_socket:
+          name: envoy.transport_sockets.raw_buffer
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
     # healthy_panic_threshold 0: hard-coded so Envoy fails fast when most or all uplinks are down.
     common_lb_config:
       healthy_panic_threshold:
@@ -44,7 +48,7 @@ resources:
   - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
     name: cluster_udp_bind
     connect_timeout: 5s
-    type: STRICT_DNS
+    type: STATIC
     lb_policy: ROUND_ROBIN
     health_checks:
       - timeout: 2s

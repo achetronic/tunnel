@@ -331,6 +331,78 @@ func TestBuildPlanErrorCases(t *testing.T) {
 			t.Fatal("error message is empty")
 		}
 	})
+
+	t.Run("invalid ConnectTimeout", func(t *testing.T) {
+		bindings := []v1alpha1.PortBinding{
+			{
+				Spec: v1alpha1.PortBindingSpec{
+					Bindings: []v1alpha1.PortBindingDefinition{
+						{
+							Name:       "bad",
+							Protocol:   "TCP",
+							ListenPort: 80,
+							Target:     v1alpha1.BindingTarget{Address: "1.2.3.4", Port: 80},
+							TCP: &v1alpha1.TCPParams{
+								ConnectTimeout: "invalid-duration",
+							},
+						},
+					},
+				},
+			},
+		}
+		_, err := BuildPlan(goodNode, bindings, goodResolver, "priv", "pub", goodKeys)
+		if err == nil {
+			t.Fatal("expected error for invalid TCP ConnectTimeout")
+		}
+	})
+
+	t.Run("invalid IdleTimeout", func(t *testing.T) {
+		bindings := []v1alpha1.PortBinding{
+			{
+				Spec: v1alpha1.PortBindingSpec{
+					Bindings: []v1alpha1.PortBindingDefinition{
+						{
+							Name:       "bad",
+							Protocol:   "TCP",
+							ListenPort: 80,
+							Target:     v1alpha1.BindingTarget{Address: "1.2.3.4", Port: 80},
+							TCP: &v1alpha1.TCPParams{
+								IdleTimeout: "invalid-duration",
+							},
+						},
+					},
+				},
+			},
+		}
+		_, err := BuildPlan(goodNode, bindings, goodResolver, "priv", "pub", goodKeys)
+		if err == nil {
+			t.Fatal("expected error for invalid TCP IdleTimeout")
+		}
+	})
+
+	t.Run("invalid UDP SessionTimeout", func(t *testing.T) {
+		bindings := []v1alpha1.PortBinding{
+			{
+				Spec: v1alpha1.PortBindingSpec{
+					Bindings: []v1alpha1.PortBindingDefinition{
+						{
+							Name:       "bad",
+							Protocol:   "UDP",
+							ListenPort: 80,
+							Target:     v1alpha1.BindingTarget{Address: "1.2.3.4", Port: 80},
+							UDP: &v1alpha1.UDPParams{
+								SessionTimeout: "invalid-duration",
+							},
+						},
+					},
+				},
+			},
+		}
+		_, err := BuildPlan(goodNode, bindings, goodResolver, "priv", "pub", goodKeys)
+		if err == nil {
+			t.Fatal("expected error for invalid UDP SessionTimeout")
+		}
+	})
 }
 
 // TestResolveEnvoyHealthCheck_Defaults verifies that a zero-value HealthCheckSpec
@@ -937,5 +1009,70 @@ func TestBuildPlan_TLSSecretNamespaceResolution(t *testing.T) {
 	// An explicit namespace must be preserved verbatim.
 	if got["web-explicit"] != "shared-certs" {
 		t.Fatalf("explicit secretRef namespace must be preserved, got %q", got["web-explicit"])
+	}
+}
+
+// TestBuildPlan_DurationNormalization asserts that standard durations (like "1h", "30m", "90s") are normalized
+// to Envoy-compliant seconds format (e.g., "3600s", "1800s", "90s") on BuildPlan.
+func TestBuildPlan_DurationNormalization(t *testing.T) {
+	node := makeNode()
+	node.Spec.Uplink.Replicas = 1
+	resolver := mockResolver{
+		ip: map[string]string{"default/svc1": "10.96.1.1"},
+	}
+	keys := map[int32]string{0: "pub0"}
+	bindings := []v1alpha1.PortBinding{
+		{
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "tcp-norm",
+						Protocol:   "TCP",
+						ListenPort: 80,
+						Target:     v1alpha1.BindingTarget{Address: "1.2.3.4", Port: 80},
+						TCP: &v1alpha1.TCPParams{
+							ConnectTimeout: "30s",
+							IdleTimeout:    "1h",
+						},
+					},
+					{
+						Name:       "udp-norm",
+						Protocol:   "UDP",
+						ListenPort: 53,
+						Target:     v1alpha1.BindingTarget{Address: "1.2.3.4", Port: 53},
+						UDP: &v1alpha1.UDPParams{
+							SessionTimeout: "15m",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	plan, err := BuildPlan(node, bindings, resolver, "priv", "pub", keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify that the LDS/CDS rendered output contains the normalized durations and NOT the original ones.
+	ldsStr := string(plan.EnvoyLDS)
+	cdsStr := string(plan.EnvoyCDS)
+
+	if strings.Contains(ldsStr, "idle_timeout: 1h") {
+		t.Fatal("LDS must not contain raw non-normalized 'idle_timeout: 1h'")
+	}
+	if !strings.Contains(ldsStr, "idle_timeout: 3600s") {
+		t.Fatal("LDS must contain normalized 'idle_timeout: 3600s'")
+	}
+
+	if strings.Contains(ldsStr, "idle_timeout: 15m") {
+		t.Fatal("LDS must not contain raw non-normalized 'idle_timeout: 15m'")
+	}
+	if !strings.Contains(ldsStr, "idle_timeout: 900s") {
+		t.Fatal("LDS must contain normalized 'idle_timeout: 900s'")
+	}
+
+	if strings.Contains(cdsStr, "connect_timeout: 30s") == false {
+		t.Fatal("CDS must contain normalized 'connect_timeout: 30s'")
 	}
 }

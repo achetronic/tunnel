@@ -3,6 +3,7 @@ package planner
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/achetronic/tunnel/api/v1alpha1"
 	"github.com/achetronic/tunnel/internal/agentconfig"
@@ -492,7 +493,9 @@ func buildEnvoyListeners(allDefs []v1alpha1.PortBindingDefinition, resolver Targ
 		}
 
 		listener.HealthCheck = healthCheck
-		applyProtocolDefaults(&listener, def)
+		if err := applyProtocolDefaults(&listener, def); err != nil {
+			return nil, nil, err
+		}
 		envoyListeners = append(envoyListeners, listener)
 
 		nftRules = append(nftRules, agentconfig.NftablesRule{
@@ -527,7 +530,7 @@ func resolveTarget(def v1alpha1.PortBindingDefinition, resolver TargetResolver) 
 
 // applyProtocolDefaults copies the protocol-specific tuning from the binding
 // definition into the listener and fills in the default timeouts when unset.
-func applyProtocolDefaults(listener *render.EnvoyListener, def v1alpha1.PortBindingDefinition) {
+func applyProtocolDefaults(listener *render.EnvoyListener, def v1alpha1.PortBindingDefinition) error {
 	if def.Protocol == "TCP" {
 		if def.TCP != nil {
 			listener.TCP.ProxyProtocol = def.TCP.ProxyProtocol
@@ -540,7 +543,17 @@ func applyProtocolDefaults(listener *render.EnvoyListener, def v1alpha1.PortBind
 		if listener.TCP.IdleTimeout == "" {
 			listener.TCP.IdleTimeout = "3600s"
 		}
-		return
+
+		var err error
+		listener.TCP.ConnectTimeout, err = normalizeEnvoyDuration(listener.TCP.ConnectTimeout)
+		if err != nil {
+			return fmt.Errorf("binding %s: invalid TCP ConnectTimeout: %w", def.Name, err)
+		}
+		listener.TCP.IdleTimeout, err = normalizeEnvoyDuration(listener.TCP.IdleTimeout)
+		if err != nil {
+			return fmt.Errorf("binding %s: invalid TCP IdleTimeout: %w", def.Name, err)
+		}
+		return nil
 	}
 	if def.UDP != nil {
 		listener.UDP.SessionTimeout = def.UDP.SessionTimeout
@@ -548,6 +561,25 @@ func applyProtocolDefaults(listener *render.EnvoyListener, def v1alpha1.PortBind
 	if listener.UDP.SessionTimeout == "" {
 		listener.UDP.SessionTimeout = "60s"
 	}
+
+	var err error
+	listener.UDP.SessionTimeout, err = normalizeEnvoyDuration(listener.UDP.SessionTimeout)
+	if err != nil {
+		return fmt.Errorf("binding %s: invalid UDP SessionTimeout: %w", def.Name, err)
+	}
+	return nil
+}
+
+// normalizeEnvoyDuration parses a Go duration string and converts it to the
+// Envoy-compatible integer seconds format with a trailing "s". It ensures
+// any user-supplied duration is properly structured as an integer seconds
+// value to prevent protobuf duration parsing failures inside Envoy.
+func normalizeEnvoyDuration(s string) (string, error) {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%ds", int64(d.Seconds())), nil
 }
 
 // buildTLSMaterials iterates over the binding definitions and produces one

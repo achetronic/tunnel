@@ -133,7 +133,7 @@ const cdsTpl = `resources:
     {{- else }}
     connect_timeout: 5s
     {{- end }}
-    type: STRICT_DNS
+    type: STATIC
     lb_policy: ROUND_ROBIN
     health_checks:
       - timeout: {{ .HealthCheck.Timeout }}
@@ -142,6 +142,12 @@ const cdsTpl = `resources:
         healthy_threshold: {{ .HealthCheck.HealthyThreshold }}
         http_health_check:
           path: /ready
+        {{- if and (eq .Protocol "TCP") .TCP.ProxyProtocol }}
+        transport_socket:
+          name: envoy.transport_sockets.raw_buffer
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+        {{- end }}
     # healthy_panic_threshold 0: hard-coded so Envoy fails fast when most or all uplinks are down.
     common_lb_config:
       healthy_panic_threshold:

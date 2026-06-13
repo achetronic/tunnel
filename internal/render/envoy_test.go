@@ -91,6 +91,43 @@ func TestRenderEnvoyLDSAndCDS(t *testing.T) {
 		t.Fatal("missing proxy protocol upstream config in cdsOut")
 	}
 
+	// Assert cluster type is STATIC not STRICT_DNS (FIX 3)
+	if bytes.Contains(cdsOut, []byte("type: STRICT_DNS")) {
+		t.Fatal("expected cluster type to not be STRICT_DNS (FIX 3)")
+	}
+	if !bytes.Contains(cdsOut, []byte("type: STATIC")) {
+		t.Fatal("expected cluster type to be STATIC (FIX 3)")
+	}
+
+	// Assert that for a proxyProtocol cluster, the health check overrides the transport socket (FIX 2)
+	// Whereas a non-proxy cluster has no such override under health checks.
+	// cluster_tcp_bind is proxyProtocol, cluster_udp_bind is not proxyProtocol.
+	if !bytes.Contains(cdsOut, []byte("name: cluster_tcp_bind")) {
+		t.Fatal("missing cluster_tcp_bind in cdsOut")
+	}
+	if !bytes.Contains(cdsOut, []byte("name: cluster_udp_bind")) {
+		t.Fatal("missing cluster_udp_bind in cdsOut")
+	}
+
+	tcpIndex := bytes.Index(cdsOut, []byte("name: cluster_tcp_bind"))
+	udpIndex := bytes.Index(cdsOut, []byte("name: cluster_udp_bind"))
+	if tcpIndex == -1 || udpIndex == -1 {
+		t.Fatal("could not find both clusters in cdsOut")
+	}
+
+	tcpClusterBlock := cdsOut[tcpIndex:udpIndex]
+	udpClusterBlock := cdsOut[udpIndex:]
+
+	// Inside the proxyProtocol TCP cluster block, health check must specify raw_buffer transport_socket
+	if !bytes.Contains(tcpClusterBlock, []byte("envoy.transport_sockets.raw_buffer")) {
+		t.Fatal("expected raw_buffer transport socket under health check for proxy cluster (FIX 2)")
+	}
+
+	// Inside the non-proxy UDP cluster block, health check must NOT specify raw_buffer transport_socket
+	if bytes.Contains(udpClusterBlock, []byte("envoy.transport_sockets.raw_buffer")) {
+		t.Fatal("expected no raw_buffer transport socket under health check for non-proxy cluster (FIX 2)")
+	}
+
 	cdsWant := goldenRead(t, "envoy_cds.golden", cdsOut)
 	if !bytes.Equal(cdsOut, cdsWant) {
 		t.Fatalf("CDS output mismatch:\ngot:\n%s\nwant:\n%s", cdsOut, cdsWant)
