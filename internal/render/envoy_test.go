@@ -161,8 +161,9 @@ func TestRenderEnvoySDS(t *testing.T) {
 }
 
 // TestRenderEnvoyLDS_TLSPassthrough verifies that a TCP listener with
-// TLS mode "passthrough" emits a tls_inspector listener_filter and a
-// filter_chain_match on server_names without a downstream transport_socket.
+// TLS mode "passthrough" emits a tls_inspector listener_filter and a catch-all
+// filter chain (no filter_chain_match, no server_names) without a downstream
+// transport_socket, so it forwards every connection regardless of SNI.
 func TestRenderEnvoyLDS_TLSPassthrough(t *testing.T) {
 	cfg := EnvoyConfig{
 		Listeners: []EnvoyListener{
@@ -199,8 +200,15 @@ func TestRenderEnvoyLDS_TLSPassthrough(t *testing.T) {
 	if !bytes.Contains(out, []byte("tls_inspector")) {
 		t.Fatal("missing tls_inspector listener_filter in passthrough output")
 	}
-	if !bytes.Contains(out, []byte("filter_chain_match")) {
-		t.Fatal("missing filter_chain_match in passthrough output")
+	// The passthrough filter chain must be catch-all: a bare server_names: ["*"]
+	// is not a match-all in Envoy L4 (only exact names and *.suffix wildcards
+	// match), so any real SNI or no-SNI connection would hit no filter chain and
+	// be reset. The chain therefore carries no filter_chain_match at all.
+	if bytes.Contains(out, []byte("filter_chain_match")) {
+		t.Fatal("passthrough filter chain must be catch-all (no filter_chain_match)")
+	}
+	if bytes.Contains(out, []byte("server_names")) {
+		t.Fatal("passthrough must not pin server_names; a bare \"*\" matches nothing")
 	}
 	if bytes.Contains(out, []byte("DownstreamTlsContext")) {
 		t.Fatal("passthrough must NOT contain DownstreamTlsContext")

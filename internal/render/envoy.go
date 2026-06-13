@@ -45,10 +45,7 @@ const ldsTpl = `resources:
     {{- end }}
     filter_chains:
       {{- if and .TLS (eq .TLS.Mode "passthrough") }}
-      - filter_chain_match:
-          server_names:
-            - "*"
-        filters:
+      - filters:
           - name: envoy.filters.network.tcp_proxy
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy
