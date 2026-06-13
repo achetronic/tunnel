@@ -866,3 +866,90 @@ func TestEnroll_CorruptedStateReEnrolls(t *testing.T) {
 		t.Error("expected state.json to be written during full re-enroll, but it was not")
 	}
 }
+
+// TestEnroll_RebootSurvivalAndConfigOrder verifies the enroll robustness fixes:
+// a wg-relay boot oneshot is installed and enabled, the Envoy unit depends on
+// it, the stale-temp sweep covers /etc/systemd/system, and CDS is written
+// before LDS so a write interruption never leaves a listener referencing an
+// absent cluster.
+func TestEnroll_RebootSurvivalAndConfigOrder(t *testing.T) {
+	fake := sshexec.NewFakeExecutor()
+	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
+		switch {
+		case strings.Contains(cmd, "mv /etc/envoy/lds.yaml.tmp /etc/envoy/lds.yaml"):
+			fake.Files["/etc/envoy/lds.yaml"] = fake.Files["/etc/envoy/lds.yaml.tmp"]
+			delete(fake.Files, "/etc/envoy/lds.yaml.tmp")
+			return "", nil
+		case strings.Contains(cmd, "mv /etc/envoy/cds.yaml.tmp /etc/envoy/cds.yaml"):
+			fake.Files["/etc/envoy/cds.yaml"] = fake.Files["/etc/envoy/cds.yaml.tmp"]
+			delete(fake.Files, "/etc/envoy/cds.yaml.tmp")
+			return "", nil
+		case strings.Contains(cmd, "uname -m"):
+			return unameX8664, nil
+		case strings.Contains(cmd, "test -x "+tunnelctlBinPath):
+			return "", nil
+		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
+			if _, ok := fake.Files["/etc/tunnel-operator/state.json"]; !ok {
+				return "", &ssh.ExitError{}
+			}
+			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "tunnelctl status"):
+			return relayStatusJSON, nil
+		case strings.Contains(cmd, "systemctl is-active"):
+			return activeServiceLine, nil
+		default:
+			return "", nil
+		}
+	}
+
+	plan := &planner.Plan{
+		RelayDocument:     []byte(`{"version":1}`),
+		EnvoyLDS:          []byte("lds"),
+		EnvoyCDS:          []byte("cds"),
+		RelayDocumentHash: "h1",
+		TunnelctlDir:      tunnelctlFixtureDir(t),
+		EnvoyVersion:      "1.30.1",
+		EnvoyLDSHash:      "h2",
+		EnvoyCDSHash:      "h3",
+		RelayIP:           "10.200.0.1",
+	}
+
+	if _, err := Enroll(context.Background(), fake, plan, nil); err != nil {
+		t.Fatalf("enroll failed: %v", err)
+	}
+
+	joined := strings.Join(fake.Runs, "\n")
+
+	// FIX reboot: the wg-relay boot oneshot must be installed with a tunnelctl
+	// apply ExecStart for the relay document, the Envoy unit must depend on it,
+	// and wg-relay must be enabled so it runs on boot.
+	wgUnit := string(fake.Files["/etc/systemd/system/wg-relay.service"])
+	if !strings.Contains(wgUnit, "ExecStart="+tunnelctlBinPath+" apply --config "+relayDocumentPath) {
+		t.Fatalf("wg-relay.service missing tunnelctl apply ExecStart; got:\n%s", wgUnit)
+	}
+	if !strings.Contains(wgUnit, "Type=oneshot") || !strings.Contains(wgUnit, "WantedBy=multi-user.target") {
+		t.Fatalf("wg-relay.service is not a boot oneshot; got:\n%s", wgUnit)
+	}
+	envoyUnit := string(fake.Files["/etc/systemd/system/envoy.service"])
+	if !strings.Contains(envoyUnit, "Requires=wg-relay.service") {
+		t.Fatalf("envoy.service must require wg-relay.service; got:\n%s", envoyUnit)
+	}
+	if !strings.Contains(joined, "systemctl enable wg-relay.service") {
+		t.Fatalf("wg-relay.service was not enabled; runs:\n%s", joined)
+	}
+
+	// FIX m-3: the sweep must cover /etc/systemd/system where unit temp files land.
+	if !strings.Contains(joined, "/etc/systemd/system") || !strings.Contains(joined, ".tunnel.*") {
+		t.Fatalf("stale-temp sweep does not cover /etc/systemd/system; runs:\n%s", joined)
+	}
+
+	// FIX m-4: CDS must be written before LDS.
+	cdsIdx := strings.Index(joined, "mv /etc/envoy/cds.yaml.tmp /etc/envoy/cds.yaml")
+	ldsIdx := strings.Index(joined, "mv /etc/envoy/lds.yaml.tmp /etc/envoy/lds.yaml")
+	if cdsIdx < 0 || ldsIdx < 0 {
+		t.Fatalf("expected both CDS and LDS atomic moves; runs:\n%s", joined)
+	}
+	if cdsIdx > ldsIdx {
+		t.Fatalf("CDS must be applied before LDS, got cds at %d after lds at %d", cdsIdx, ldsIdx)
+	}
+}

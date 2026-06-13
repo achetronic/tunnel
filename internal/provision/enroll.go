@@ -64,7 +64,7 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 	}
 
 	// Clean up stale temporary files from interrupted transfers in designated directories.
-	sweepCmd := "find /usr/local/bin /etc/tunnel-operator /etc/envoy /etc/envoy/tls -maxdepth 1 -name '.tunnel.*' -delete 2>/dev/null || true"
+	sweepCmd := "find /usr/local/bin /etc/tunnel-operator /etc/envoy /etc/envoy/tls /etc/systemd/system -maxdepth 1 -name '.tunnel.*' -delete 2>/dev/null || true"
 	if _, err := exec.Run(ctx, sweepCmd); err != nil {
 		slog.Warn("enroll: failed to sweep stale temporary files", "error", err)
 	}
@@ -253,12 +253,31 @@ func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version stri
 	return true, nil
 }
 
-// writeEnvoyService installs the Envoy systemd unit and reloads systemd so it
-// picks up the new unit.
+// writeEnvoyService installs the Envoy systemd unit and a boot-time oneshot
+// that reapplies the WireGuard relay, then reloads systemd and enables both so
+// they come back after a VPS reboot. The wg-relay interface is created natively
+// by tunnelctl and is not kernel-persistent, so without a boot unit a reboot
+// leaves Envoy unable to bind its admin to the tunnel IP and unable to reach the
+// uplinks until the next operator reconcile. The wg-relay oneshot runs the same
+// tunnelctl already on the host (no resident daemon), and the Envoy unit depends
+// on it so WireGuard is up before Envoy starts.
 func writeEnvoyService(ctx context.Context, exec sshexec.Executor) error {
+	wgRelayService := `[Unit]
+Description=Tunnel WireGuard relay
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=` + tunnelctlBinPath + ` apply --config ` + relayDocumentPath + `
+
+[Install]
+WantedBy=multi-user.target
+`
 	envoyService := `[Unit]
 Description=Envoy Proxy
-After=network.target
+After=network.target wg-relay.service
+Requires=wg-relay.service
 
 [Service]
 ExecStart=/usr/local/bin/envoy -c /etc/envoy/envoy.yaml
@@ -272,11 +291,20 @@ WantedBy=multi-user.target
 	if _, err := exec.Run(ctx, "mkdir -p /etc/envoy"); err != nil {
 		return fmt.Errorf("failed to create envoy dir: %w", err)
 	}
+	if err := exec.Put(ctx, "/etc/systemd/system/wg-relay.service", []byte(wgRelayService)); err != nil {
+		return fmt.Errorf("failed to write wg-relay.service: %w", err)
+	}
 	if err := exec.Put(ctx, "/etc/systemd/system/envoy.service", []byte(envoyService)); err != nil {
 		return fmt.Errorf("failed to write envoy.service: %w", err)
 	}
 	if _, err := exec.Run(ctx, "systemctl daemon-reload"); err != nil {
 		return fmt.Errorf("failed to reload systemd: %w", err)
+	}
+	// Enable wg-relay so the relay is reapplied on boot. Envoy is enabled
+	// alongside its start in ensureEnvoyRunning; enabling wg-relay here keeps
+	// the boot-survival contract in one place.
+	if _, err := exec.Run(ctx, "systemctl enable wg-relay.service"); err != nil {
+		return fmt.Errorf("failed to enable wg-relay.service: %w", err)
 	}
 	return nil
 }
@@ -325,23 +353,12 @@ func applyRelayDocument(ctx context.Context, exec sshexec.Executor, plan *planne
 }
 
 // applyEnvoyConfig syncs the Envoy LDS and CDS discovery files when their plan
-// hashes changed, persisting each new hash as it is applied.
+// hashes changed, persisting each new hash as it is applied. CDS is written
+// before LDS: Envoy loads clusters independently, so writing the cluster first
+// guarantees that if the connection drops between the two writes, the existing
+// listeners still reference present clusters and a newly added listener never
+// references a cluster that has not arrived yet.
 func applyEnvoyConfig(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, state *State) error {
-	if state.EnvoyLDSHash != plan.EnvoyLDSHash {
-		slog.Info("enroll: applying envoy LDS config")
-		if err := exec.Put(ctx, "/etc/envoy/lds.yaml.tmp", plan.EnvoyLDS); err != nil {
-			return fmt.Errorf("failed to put lds.yaml.tmp: %w", err)
-		}
-		if _, err := exec.Run(ctx, "mv /etc/envoy/lds.yaml.tmp /etc/envoy/lds.yaml"); err != nil {
-			return fmt.Errorf("failed to rename lds.yaml: %w", err)
-		}
-
-		state.EnvoyLDSHash = plan.EnvoyLDSHash
-		if err := writeState(ctx, exec, state); err != nil {
-			return fmt.Errorf("failed to persist lds config state: %w", err)
-		}
-	}
-
 	if state.EnvoyCDSHash != plan.EnvoyCDSHash {
 		slog.Info("enroll: applying envoy CDS config")
 		if err := exec.Put(ctx, "/etc/envoy/cds.yaml.tmp", plan.EnvoyCDS); err != nil {
@@ -354,6 +371,21 @@ func applyEnvoyConfig(ctx context.Context, exec sshexec.Executor, plan *planner.
 		state.EnvoyCDSHash = plan.EnvoyCDSHash
 		if err := writeState(ctx, exec, state); err != nil {
 			return fmt.Errorf("failed to persist cds config state: %w", err)
+		}
+	}
+
+	if state.EnvoyLDSHash != plan.EnvoyLDSHash {
+		slog.Info("enroll: applying envoy LDS config")
+		if err := exec.Put(ctx, "/etc/envoy/lds.yaml.tmp", plan.EnvoyLDS); err != nil {
+			return fmt.Errorf("failed to put lds.yaml.tmp: %w", err)
+		}
+		if _, err := exec.Run(ctx, "mv /etc/envoy/lds.yaml.tmp /etc/envoy/lds.yaml"); err != nil {
+			return fmt.Errorf("failed to rename lds.yaml: %w", err)
+		}
+
+		state.EnvoyLDSHash = plan.EnvoyLDSHash
+		if err := writeState(ctx, exec, state); err != nil {
+			return fmt.Errorf("failed to persist lds config state: %w", err)
 		}
 	}
 	return nil
@@ -457,7 +489,7 @@ func RestartEnvoy(ctx context.Context, exec sshexec.Executor) error {
 // process comes up, so a healthy but still-starting envoy is not misread as a
 // failure.
 func waitEnvoyActive(ctx context.Context, exec sshexec.Executor) error {
-	const attempts = 10
+	const attempts = 30
 	var last string
 	for range attempts {
 		out, err := exec.Run(ctx, "systemctl is-active envoy")
