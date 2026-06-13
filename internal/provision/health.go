@@ -42,7 +42,7 @@ func CheckHealth(ctx context.Context, exec sshexec.Executor) (*HealthStatus, err
 	// tunnelctl status exits non-zero when the relay is not ready (or absent),
 	// but still prints its JSON report. A missing binary/config on the first
 	// enrollment also surfaces as an exit error, which we treat as not-healthy.
-	out, err = runWithRetry(ctx, exec, fmt.Sprintf("tunnelctl status --config %s", relayDocumentPath))
+	out, err = runWithRetry(ctx, exec, fmt.Sprintf("%s status --config %s", tunnelctlBinPath, relayDocumentPath))
 	if err != nil && !isExitError(err) {
 		return nil, fmt.Errorf("failed to query relay status: %w", err)
 	}

@@ -122,6 +122,38 @@ func TestEnroll_Idempotent(t *testing.T) {
 		t.Fatal("tunnelctl apply was not run")
 	}
 
+	// Assert the Envoy version probe uses the absolute path, not a bare command.
+	var foundAbsoluteEnvoyProbe bool
+	var foundBareEnvoyProbe bool
+	for _, cmd := range fake.Runs {
+		if strings.Contains(cmd, "envoy --version") {
+			if strings.HasPrefix(cmd, "/usr/local/bin/envoy") {
+				foundAbsoluteEnvoyProbe = true
+			} else {
+				foundBareEnvoyProbe = true
+			}
+		}
+	}
+	if !foundAbsoluteEnvoyProbe {
+		t.Error("expected absolute path for Envoy version probe, but none was found")
+	}
+	if foundBareEnvoyProbe {
+		t.Error("found bare envoy --version invocation which violates absolute path requirements")
+	}
+
+	// Assert the tunnelctl apply uses the absolute path, not a bare command.
+	var foundAbsoluteTunnelctlApply bool
+	for _, cmd := range fake.Runs {
+		if strings.Contains(cmd, "tunnelctl apply") {
+			if strings.HasPrefix(cmd, "/usr/local/bin/tunnelctl apply") {
+				foundAbsoluteTunnelctlApply = true
+			}
+		}
+	}
+	if !foundAbsoluteTunnelctlApply {
+		t.Error("expected absolute path for tunnelctl apply, but none was found")
+	}
+
 	runsBefore := len(fake.Runs)
 	_, err = Enroll(context.Background(), fake, plan, nil)
 	if err != nil {
@@ -250,7 +282,9 @@ func TestTeardown(t *testing.T) {
 		"ip link del wg-relay",
 		"rm -f " + tunnelctlBinPath,
 		"systemctl disable --now envoy",
+		"systemctl disable --now wg-relay.service",
 		"rm -f /etc/systemd/system/envoy.service",
+		"rm -f /etc/systemd/system/wg-relay.service",
 		"systemctl daemon-reload",
 		"rm -rf /etc/envoy",
 		"rm -f /etc/sysctl.d/99-tunnel.conf",

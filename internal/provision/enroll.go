@@ -24,6 +24,9 @@ const (
 	relayDocumentPath = "/etc/tunnel-operator/relay.json"
 	// tunnelctlBinPath is where the tunnelctl binary is installed on the VPS.
 	tunnelctlBinPath = "/usr/local/bin/tunnelctl"
+	// envoyBinPath is the absolute path to the Envoy binary on the VPS.
+	// This absolute path is used to invoke the binary directly.
+	envoyBinPath = "/usr/local/bin/envoy"
 	// archAMD64 and archARM64 are the GOARCH suffixes used in the tunnelctl
 	// release asset names (tunnelctl-linux-<arch>).
 	archAMD64 = "amd64"
@@ -232,7 +235,7 @@ func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version stri
 
 	// Reinstall when envoy is absent or reports a different version. Envoy's
 	// --version output embeds the release as "/<version>/".
-	probeOut, probeErr := exec.Run(ctx, "envoy --version 2>/dev/null")
+	probeOut, probeErr := exec.Run(ctx, envoyBinPath+" --version 2>/dev/null")
 	if probeErr != nil && !isExitError(probeErr) {
 		return false, fmt.Errorf("failed to probe envoy version: %w", probeErr)
 	}
@@ -242,8 +245,9 @@ func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version stri
 	}
 
 	downloadCmd := fmt.Sprintf(
-		"curl -fsL %s -o /tmp/envoy && chmod +x /tmp/envoy && mv /tmp/envoy /usr/local/bin/envoy",
+		"curl -fsL %s -o /tmp/envoy && chmod +x /tmp/envoy && mv /tmp/envoy %s",
 		downloadURL,
+		envoyBinPath,
 	)
 
 	slog.Info("enroll: ensuring envoy binary (downloads on first run or version change)", "arch", arch, "version", version)
@@ -280,7 +284,7 @@ After=network.target wg-relay.service
 Requires=wg-relay.service
 
 [Service]
-ExecStart=/usr/local/bin/envoy -c /etc/envoy/envoy.yaml
+ExecStart=` + envoyBinPath + ` -c /etc/envoy/envoy.yaml
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
@@ -341,7 +345,7 @@ func applyRelayDocument(ctx context.Context, exec sshexec.Executor, plan *planne
 		return fmt.Errorf("failed to install relay document: %w", err)
 	}
 
-	if _, err := exec.Run(ctx, "tunnelctl apply --config "+relayDocumentPath); err != nil {
+	if _, err := exec.Run(ctx, tunnelctlBinPath+" apply --config "+relayDocumentPath); err != nil {
 		return fmt.Errorf("failed to apply relay document: %w", err)
 	}
 

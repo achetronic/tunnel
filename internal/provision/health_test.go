@@ -30,6 +30,19 @@ func TestCheckHealth(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Assert the tunnelctl status uses the absolute path, not a bare command.
+	var foundAbsoluteTunnelctlStatus bool
+	for _, cmd := range fake.Runs {
+		if strings.Contains(cmd, "tunnelctl status") {
+			if strings.HasPrefix(cmd, "/usr/local/bin/tunnelctl status") {
+				foundAbsoluteTunnelctlStatus = true
+			}
+		}
+	}
+	if !foundAbsoluteTunnelctlStatus {
+		t.Error("expected absolute path for tunnelctl status, but none was found")
+	}
+
 	if !status.EnvoyHealthy {
 		t.Error("expected envoy to be healthy")
 	}

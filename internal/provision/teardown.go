@@ -25,12 +25,18 @@ func Teardown(ctx context.Context, exec sshexec.Executor) error {
 		return fmt.Errorf("failed to remove tunnelctl binary: %w", err)
 	}
 
-	// Envoy service and configuration (envoy.yaml, lds.yaml, cds.yaml)
+	// Envoy service and configuration (envoy.yaml, lds.yaml, cds.yaml) and wg-relay service
 	if _, err := exec.Run(ctx, "systemctl disable --now envoy || true"); err != nil {
 		return fmt.Errorf("failed to stop envoy: %w", err)
 	}
+	if _, err := exec.Run(ctx, "systemctl disable --now wg-relay.service || true"); err != nil {
+		return fmt.Errorf("failed to stop wg-relay.service: %w", err)
+	}
 	if _, err := exec.Run(ctx, "rm -f /etc/systemd/system/envoy.service"); err != nil {
 		return fmt.Errorf("failed to remove envoy.service: %w", err)
+	}
+	if _, err := exec.Run(ctx, "rm -f /etc/systemd/system/wg-relay.service"); err != nil {
+		return fmt.Errorf("failed to remove wg-relay.service: %w", err)
 	}
 	if _, err := exec.Run(ctx, "systemctl daemon-reload || true"); err != nil {
 		return fmt.Errorf("failed to reload systemd: %w", err)
