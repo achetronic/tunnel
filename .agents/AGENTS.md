@@ -77,7 +77,7 @@ pure + deterministic:
   referencing the node, resolves Service targets to ClusterIPs, calls `planner.BuildPlan`,
   and pushes config. The happy path requeues after `RequeueInterval` (default 3 min) as a
   drift-detection safety net; re-render between requeues is driven by watches (the EdgeNode,
-  the trigger label, and the TLS Secrets it references). Drift detection compares
+  the PortBindings that reference it, and the TLS Secrets it references). Drift detection compares
   `status.appliedConfigHash` + per-artifact hashes
   against the remote `state.json` and only re-pushes/restarts when they differ. Optimistic
   conflicts become clean requeues.
@@ -90,15 +90,19 @@ pure + deterministic:
   `Watches` Secrets and `mapSecretToEdgeNodes` re-enqueues affected EdgeNodes on rotation.
 - **PortBindings have their own independent reconciler.** The two controllers share no
   code or memory; they communicate exclusively through the API server.
-  `PortBindingReconciler` never touches SSH/uplink/targets: on create/update it adds a
-  finalizer and bumps the `tunnel.achetronic.com/last-portbinding-trigger` label on the
-  referenced EdgeNode; on delete the finalizer lets it bump that label one last time (so
-  the EdgeNode re-renders and drops the listeners) before removing the finalizer. A
-  missing EdgeNode makes the trigger a no-op. In the other direction, the
+  `PortBindingReconciler` never touches SSH/uplink/targets and never writes to the
+  EdgeNode: its sole job is publishing the PortBinding's `Programmed`/`Ready` conditions.
+  Plan rebuilding is driven by the EdgeNodeReconciler's own `Watches` on PortBindings
+  (`mapPortBindingToEdgeNode`, generation-filtered so PortBinding status writes are
+  ignored): create, spec change and delete events enqueue the referenced EdgeNode, which
+  re-renders from the live PortBinding list. In the other direction, the
   EdgeNodeReconciler publishes `status.appliedBindings` after each successful enroll and
   the PortBindingReconciler `Watches` EdgeNodes to re-enqueue its bindings when that
   status changes (this watch deliberately reacts to status updates; the EdgeNode's own
-  `For()` predicate filters them out — predicates are per-watch, they don't clash).
+  `For()` predicate filters them out, since predicates are per-watch they don't clash).
+  PortBindings carry no finalizer; deletion visibility comes from the watch, and a
+  lingering `tunnel.achetronic.com/portbinding-finalizer` on an object is removed by the
+  reconciler so it never blocks deletion.
 - **Deletion is finalizer-guarded** (`tunnel.achetronic.com/finalizer`). Teardown runs
   `provision.Teardown` over SSH and then `deleteUplinkResources` deletes the uplink
   StatefulSet/ConfigMap/Secret explicitly; owner-reference GC does NOT apply because

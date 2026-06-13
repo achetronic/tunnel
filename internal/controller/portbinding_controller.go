@@ -40,8 +40,9 @@ import (
 // PortBindingReconciler reconciles a PortBinding object. It is fully
 // independent from the EdgeNodeReconciler: the two only meet through the
 // PortBinding's EdgeNodeRef. This reconciler never touches SSH, the uplink, or
-// resolves targets; its sole job is to nudge the referenced EdgeNode so the
-// EdgeNodeReconciler rebuilds the aggregate plan.
+// resolves targets; its sole job is to publish the PortBinding's conditions.
+// Plan rebuilding is driven by the EdgeNodeReconciler's own watch on
+// PortBindings, so no cross-object writes happen here.
 type PortBindingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -50,12 +51,13 @@ type PortBindingReconciler struct {
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings/finalizers,verbs=update
-// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes,verbs=get;list;watch
 
-// Reconcile reconciles a PortBinding. On create/update it ensures a finalizer is
-// present, triggers the referenced EdgeNode and refreshes the PortBinding
-// status. On deletion it triggers the EdgeNode (so its listeners are dropped)
-// and then removes the finalizer.
+// Reconcile reconciles a PortBinding. On create/update it refreshes the
+// PortBinding status from the referenced EdgeNode's applied state. On deletion
+// it removes the legacy finalizer when present so the object can disappear;
+// the EdgeNodeReconciler observes the deletion through its PortBinding watch
+// and drops the listeners from the plan.
 func (r *PortBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var pb v1alpha1.PortBinding
 	if err := r.Get(ctx, req.NamespacedName, &pb); err != nil {
@@ -64,9 +66,6 @@ func (r *PortBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	if !pb.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(&pb, portBindingFinalizer) {
-			if err := r.triggerEdgeNode(ctx, &pb); err != nil {
-				return ctrl.Result{}, err
-			}
 			controllerutil.RemoveFinalizer(&pb, portBindingFinalizer)
 			if err := r.Update(ctx, &pb); err != nil {
 				return ctrl.Result{}, err
@@ -75,33 +74,22 @@ func (r *PortBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
-	if !controllerutil.ContainsFinalizer(&pb, portBindingFinalizer) {
-		controllerutil.AddFinalizer(&pb, portBindingFinalizer)
-		if err := r.Update(ctx, &pb); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	if err := r.triggerEdgeNode(ctx, &pb); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	pb.Status.ObservedGeneration = pb.Generation
-	// Programmed records that this reconciler did its part: the referenced
-	// EdgeNode was nudged and will rebuild its aggregate plan. It says
-	// nothing about the port being live on the edge; that is Ready's job.
+	// Programmed records that this reconciler observed the spec; the
+	// EdgeNodeReconciler's PortBinding watch rebuilds the aggregate plan. It
+	// says nothing about the port being live on the edge; that is Ready's job.
 	meta.SetStatusCondition(&pb.Status.Conditions, metav1.Condition{
 		Type:               "Programmed",
 		Status:             metav1.ConditionTrue,
 		Reason:             "Synced",
-		Message:            "PortBinding triggered EdgeNode",
+		Message:            "PortBinding observed; the referenced EdgeNode rebuilds its plan",
 		ObservedGeneration: pb.Generation,
 	})
 	// Ready is honest: True only once the EdgeNode's status reports this
 	// binding inside the last successfully applied plan. GitOps tooling
 	// (Argo/Flux) reads Ready as "operational", so it must track the edge,
 	// not our trigger.
-	ready, reason, msg := r.evaluateApplied(ctx, &pb)
+	ready, reason, msg, evalErr := r.evaluateApplied(ctx, &pb)
 	meta.SetStatusCondition(&pb.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             ready,
@@ -116,6 +104,13 @@ func (r *PortBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, err
 	}
 
+	// A transient failure reading the EdgeNode left Ready=Unknown; returning
+	// the error makes controller-runtime retry with exponential backoff
+	// instead of leaving the condition parked until an unrelated event.
+	if evalErr != nil {
+		return ctrl.Result{}, evalErr
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -123,8 +118,10 @@ func (r *PortBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 // EdgeNodeReconciler last applied successfully, by reading the EdgeNode's
 // status.appliedBindings. The two reconcilers stay decoupled: they only meet
 // through the API server (this read here, and the EdgeNode watch in
-// SetupWithManager that re-enqueues bindings when that status changes).
-func (r *PortBindingReconciler) evaluateApplied(ctx context.Context, pb *v1alpha1.PortBinding) (metav1.ConditionStatus, string, string) {
+// SetupWithManager that re-enqueues bindings when that status changes). A
+// non-NotFound read failure is returned alongside ConditionUnknown so the
+// caller can surface it for retry with backoff.
+func (r *PortBindingReconciler) evaluateApplied(ctx context.Context, pb *v1alpha1.PortBinding) (metav1.ConditionStatus, string, string, error) {
 	nodeNS := pb.Spec.EdgeNodeRef.Namespace
 	if nodeNS == "" {
 		nodeNS = pb.Namespace
@@ -132,14 +129,14 @@ func (r *PortBindingReconciler) evaluateApplied(ctx context.Context, pb *v1alpha
 	var node v1alpha1.EdgeNode
 	if err := r.Get(ctx, types.NamespacedName{Namespace: nodeNS, Name: pb.Spec.EdgeNodeRef.Name}, &node); err != nil {
 		if apierrors.IsNotFound(err) {
-			return metav1.ConditionFalse, "EdgeNodeNotFound", "Referenced EdgeNode does not exist"
+			return metav1.ConditionFalse, "EdgeNodeNotFound", "Referenced EdgeNode does not exist", nil
 		}
-		return metav1.ConditionUnknown, "EdgeNodeUnreadable", "Failed to read the referenced EdgeNode"
+		return metav1.ConditionUnknown, "EdgeNodeUnreadable", "Failed to read the referenced EdgeNode", err
 	}
 	if slices.Contains(node.Status.AppliedBindings, pb.Namespace+"/"+pb.Name) {
-		return metav1.ConditionTrue, "Applied", "Binding is part of the plan applied on the edge"
+		return metav1.ConditionTrue, "Applied", "Binding is part of the plan applied on the edge", nil
 	}
-	return metav1.ConditionFalse, "NotYetApplied", "Binding is not yet part of the applied plan"
+	return metav1.ConditionFalse, "NotYetApplied", "Binding is not yet part of the applied plan", nil
 }
 
 // SetupWithManager registers the PortBindingReconciler with the controller

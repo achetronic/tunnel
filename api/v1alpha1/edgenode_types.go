@@ -246,8 +246,10 @@ type EdgeNodeStatus struct {
 	// +optional
 	Uplink []UplinkStatus `json:"uplink,omitempty"`
 
-	// AppliedConfigHash is the SHA-256 of the last successfully applied plan
-	// (relay + proxy + nft). It is the anchor used for drift detection.
+	// AppliedConfigHash is the SHA-256 anchoring drift detection for the last
+	// successfully applied state: the plan hash (relay + proxy + nft) folded
+	// with the hash of the TLS material pushed to the edge, so certificate
+	// rotations are visible in status even when the plan itself is unchanged.
 	// +optional
 	AppliedConfigHash string `json:"appliedConfigHash,omitempty"`
 

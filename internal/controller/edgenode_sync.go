@@ -424,7 +424,7 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 	}
 
 	node.Status.PublicKey = vpsPubKey
-	node.Status.AppliedConfigHash = plan.PlanHash
+	node.Status.AppliedConfigHash = appliedConfigHash(plan.PlanHash, tlsFiles)
 	node.Status.Uplink = newUplinks
 	node.Status.AppliedBindings = appliedBindingKeys(bindings)
 

@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"strings"
 
@@ -333,12 +334,13 @@ func closeExecutor(exec sshexec.Executor, logger logr.Logger) {
 }
 
 // deleteUplinkResources removes the in-cluster uplink workload created for the
-// EdgeNode: the StatefulSet, the nftables ConfigMap, the WireGuard keys Secret
-// and the cached VPS key Secret. A NotFound error is ignored so teardown stays
-// idempotent.
+// EdgeNode: the StatefulSet, the headless Service backing its spec.serviceName,
+// the nftables ConfigMap, the WireGuard keys Secret and the cached VPS key
+// Secret. A NotFound error is ignored so teardown stays idempotent.
 func (r *EdgeNodeReconciler) deleteUplinkResources(ctx context.Context, node *v1alpha1.EdgeNode) error {
 	objs := []client.Object{
 		uplink.BuildStatefulSet(node, "", ""),
+		uplink.BuildHeadlessService(node),
 		uplink.BuildConfigMap(node, nil),
 		uplink.BuildKeysSecret(node, nil),
 		&corev1.Secret{
@@ -499,8 +501,8 @@ func (r *EdgeNodeReconciler) mapSecretToEdgeNodes(ctx context.Context, obj clien
 			// This PortBinding references the changed Secret.
 			nodeName := pb.Spec.EdgeNodeRef.Name
 			// EdgeNodeRef.Namespace defaults to the PortBinding namespace when
-			// empty, mirroring triggerEdgeNode so the enqueued request targets
-			// the same EdgeNode the rest of the controller resolves.
+			// empty, mirroring mapPortBindingToEdgeNode so the enqueued request
+			// targets the same EdgeNode the rest of the controller resolves.
 			nodeNS := pb.Spec.EdgeNodeRef.Namespace
 			if nodeNS == "" {
 				nodeNS = pb.Namespace
@@ -519,4 +521,38 @@ func (r *EdgeNodeReconciler) mapSecretToEdgeNodes(ctx context.Context, obj clien
 		}
 	}
 	return requests
+}
+
+// mapPortBindingToEdgeNode maps a PortBinding event to a reconcile.Request for
+// the EdgeNode it references. Create, spec-change and delete events all funnel
+// through here, so the EdgeNodeReconciler rebuilds the aggregate plan from the
+// live set of PortBindings without any cross-object write. An empty
+// EdgeNodeRef.Namespace defaults to the PortBinding's namespace, matching the
+// resolution used everywhere else in the controller. A missing ref name maps
+// to nothing (the binding cannot be planned anyway).
+func (r *EdgeNodeReconciler) mapPortBindingToEdgeNode(_ context.Context, obj client.Object) []reconcile.Request {
+	pb, ok := obj.(*v1alpha1.PortBinding)
+	if !ok {
+		return nil
+	}
+	name := pb.Spec.EdgeNodeRef.Name
+	if name == "" {
+		return nil
+	}
+	ns := pb.Spec.EdgeNodeRef.Namespace
+	if ns == "" {
+		ns = pb.Namespace
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{Name: name, Namespace: ns},
+	}}
+}
+
+// appliedConfigHash combines the plan hash with the hash of the TLS material
+// pushed alongside it, producing the value stored in
+// EdgeNodeStatus.AppliedConfigHash. Folding the TLS hash in makes the status
+// reflect certificate rotations: the SDS documents change the edge state even
+// though the rendered plan artifacts stay identical.
+func appliedConfigHash(planHash string, tlsFiles []provision.TLSFile) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(planHash+provision.HashTLSFiles(tlsFiles))))
 }

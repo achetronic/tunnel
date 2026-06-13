@@ -340,6 +340,7 @@ var reservedPorts = map[int32]string{
 // ListenPort for deterministic output.
 func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1alpha1.PortBindingDefinition, error) {
 	usedPorts := make(map[int32]string)
+	usedNames := make(map[string]string)
 	var allDefs []v1alpha1.PortBindingDefinition
 	for _, pb := range bindings {
 		for _, def := range pb.Spec.Bindings {
@@ -352,6 +353,17 @@ func collectBindingDefs(bindings []v1alpha1.PortBinding, listenPort int32) ([]v1
 			if existing, ok := usedPorts[def.ListenPort]; ok {
 				return nil, fmt.Errorf("port conflict on %d between %s and %s", def.ListenPort, existing, def.Name)
 			}
+			// Binding names must be unique across every PortBinding aggregated
+			// into this node's plan, not just within one CR: the name keys the
+			// Envoy listener (duplicates break the LDS update) and the SDS
+			// document path on the VPS (duplicates silently serve one binding's
+			// certificate for the other). The CRD listMapKey only guards a
+			// single CR, so the cross-CR check lives here.
+			owner := pb.Namespace + "/" + pb.Name
+			if existing, ok := usedNames[def.Name]; ok {
+				return nil, fmt.Errorf("binding name %q used by both %s and %s", def.Name, existing, owner)
+			}
+			usedNames[def.Name] = owner
 			usedPorts[def.ListenPort] = def.Name
 			allDefs = append(allDefs, def)
 		}

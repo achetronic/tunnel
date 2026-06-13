@@ -39,12 +39,11 @@ import (
 
 // edgeNodeEventPredicate defines the predicate rules for filtering EdgeNode reconcile events.
 // Status-only updates must not re-enqueue to prevent reconciliation hot loops.
-// However, changes to spec (generation), labels, or annotations must trigger a reconcile.
-// Annotations must be watched because they carry the one-shot restart-envoy trigger.
+// Spec changes (generation) and annotations must trigger a reconcile;
+// annotations carry the one-shot restart-envoy trigger.
 var edgeNodeEventPredicate = predicate.Or(
 	predicate.GenerationChangedPredicate{},
 	predicate.AnnotationChangedPredicate{},
-	predicate.LabelChangedPredicate{},
 )
 
 // EdgeNodeReconciler reconciles an EdgeNode object.
@@ -79,7 +78,7 @@ type EdgeNodeReconciler struct {
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=portbindings,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch
+// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 
@@ -191,7 +190,11 @@ var tlsSecretShaped = predicate.NewPredicateFuncs(func(obj client.Object) bool {
 // SetupWithManager registers the EdgeNodeReconciler with the controller
 // manager. It wires a default event recorder when none was injected; the
 // ExecutorFactory is left nil so production reconciles dial the real host.
-// A secondary Watch on corev1.Secret drives automatic TLS certificate rotation:
+// A Watch on PortBinding drives plan rebuilding: any PortBinding create,
+// spec change or deletion enqueues the EdgeNode it references, so the
+// aggregate plan always reflects the live set of bindings. The generation
+// predicate filters PortBinding status writes, which carry no plan input.
+// A second Watch on corev1.Secret drives automatic TLS certificate rotation:
 // when a Secret referenced by any PortBinding TLS SecretRef changes (e.g.
 // cert-manager renews it), mapSecretToEdgeNodes returns the affected EdgeNodes
 // so they are re-enqueued and the new cert is pushed to the VPS.
@@ -205,6 +208,11 @@ func (r *EdgeNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.EdgeNode{}, builder.WithPredicates(edgeNodeEventPredicate)).
+		Watches(
+			&v1alpha1.PortBinding{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPortBindingToEdgeNode),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		Watches(
 			&corev1.Secret{},
 			handler.EnqueueRequestsFromMapFunc(r.mapSecretToEdgeNodes),

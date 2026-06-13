@@ -48,20 +48,35 @@ var _ = Describe("PortBinding Controller", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
-	It("should not error when the referenced EdgeNode is not found", func() {
+	It("should map a PortBinding to its referenced EdgeNode", func() {
 		pb := &tunnelv1alpha1.PortBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "pb-missing-node", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "pb-map", Namespace: "default"},
 			Spec: tunnelv1alpha1.PortBindingSpec{
-				EdgeNodeRef: tunnelv1alpha1.ObjectReference{Name: "absent-node"},
+				EdgeNodeRef: tunnelv1alpha1.ObjectReference{Name: "some-node"},
 			},
 		}
-		Expect(newReconciler().triggerEdgeNode(ctx, pb)).To(Succeed())
+		en := &EdgeNodeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		reqs := en.mapPortBindingToEdgeNode(ctx, pb)
+		Expect(reqs).To(ConsistOf(reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "some-node", Namespace: "default"},
+		}))
+
+		By("honouring an explicit EdgeNodeRef namespace")
+		pb.Spec.EdgeNodeRef.Namespace = "infra"
+		reqs = en.mapPortBindingToEdgeNode(ctx, pb)
+		Expect(reqs).To(ConsistOf(reconcile.Request{
+			NamespacedName: types.NamespacedName{Name: "some-node", Namespace: "infra"},
+		}))
+
+		By("mapping nothing when the ref name is empty")
+		pb.Spec.EdgeNodeRef = tunnelv1alpha1.ObjectReference{}
+		Expect(en.mapPortBindingToEdgeNode(ctx, pb)).To(BeEmpty())
 	})
 
-	It("should add a finalizer and trigger the referenced EdgeNode on create", func() {
-		By("creating an EdgeNode to be triggered")
+	It("should publish conditions without writing to the EdgeNode", func() {
+		By("creating an EdgeNode the binding references")
 		node := &tunnelv1alpha1.EdgeNode{
-			ObjectMeta: metav1.ObjectMeta{Name: "trigger-node", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "cond-node", Namespace: "default"},
 			Spec: tunnelv1alpha1.EdgeNodeSpec{
 				Address: "envtest-fake",
 				SSH: tunnelv1alpha1.SSHSpec{
@@ -71,12 +86,13 @@ var _ = Describe("PortBinding Controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, node)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
+		nodeVersionBefore := node.ResourceVersion
 
 		By("creating a PortBinding referencing the node")
 		pb := &tunnelv1alpha1.PortBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "pb-trigger", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{Name: "pb-cond", Namespace: "default"},
 			Spec: tunnelv1alpha1.PortBindingSpec{
-				EdgeNodeRef: tunnelv1alpha1.ObjectReference{Name: "trigger-node"},
+				EdgeNodeRef: tunnelv1alpha1.ObjectReference{Name: "cond-node"},
 				Bindings: []tunnelv1alpha1.PortBindingDefinition{
 					{
 						Name:       "test-port",
@@ -90,40 +106,39 @@ var _ = Describe("PortBinding Controller", func() {
 		Expect(k8sClient.Create(ctx, pb)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, pb) })
 
-		pbKey := types.NamespacedName{Name: "pb-trigger", Namespace: "default"}
+		pbKey := types.NamespacedName{Name: "pb-cond", Namespace: "default"}
 
 		By("reconciling the PortBinding")
 		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: pbKey})
 		Expect(err).NotTo(HaveOccurred())
 
-		By("verifying the finalizer was added")
+		By("verifying no finalizer was added")
 		updatedPB := &tunnelv1alpha1.PortBinding{}
 		Expect(k8sClient.Get(ctx, pbKey, updatedPB)).To(Succeed())
-		Expect(controllerutil.ContainsFinalizer(updatedPB, portBindingFinalizer)).To(BeTrue())
+		Expect(controllerutil.ContainsFinalizer(updatedPB, portBindingFinalizer)).To(BeFalse())
 
-		By("verifying the trigger label was applied on the node")
+		By("verifying the conditions were published")
+		programmed := findCondition(updatedPB.Status.Conditions, "Programmed")
+		Expect(programmed).NotTo(BeNil())
+		Expect(programmed.Status).To(Equal(metav1.ConditionTrue))
+		ready := findCondition(updatedPB.Status.Conditions, "Ready")
+		Expect(ready).NotTo(BeNil())
+		Expect(ready.Reason).To(Equal("NotYetApplied"))
+
+		By("verifying the EdgeNode object was not mutated")
 		updatedNode := &tunnelv1alpha1.EdgeNode{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "trigger-node", Namespace: "default"}, updatedNode)).To(Succeed())
-		Expect(updatedNode.Labels).To(HaveKeyWithValue(portBindingTriggerLabel, "pb-trigger"))
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "cond-node", Namespace: "default"}, updatedNode)).To(Succeed())
+		Expect(updatedNode.ResourceVersion).To(Equal(nodeVersionBefore))
 	})
 
-	It("should trigger the EdgeNode and drop the finalizer on deletion", func() {
-		By("creating an EdgeNode")
-		node := &tunnelv1alpha1.EdgeNode{
-			ObjectMeta: metav1.ObjectMeta{Name: "del-node", Namespace: "default"},
-			Spec: tunnelv1alpha1.EdgeNodeSpec{
-				Address: "envtest-fake",
-				SSH: tunnelv1alpha1.SSHSpec{
-					SecretRef: tunnelv1alpha1.SecretReference{Name: "fake-secret"},
-				},
-			},
-		}
-		Expect(k8sClient.Create(ctx, node)).To(Succeed())
-		DeferCleanup(func() { _ = k8sClient.Delete(ctx, node) })
-
-		By("creating and reconciling a PortBinding so it gets the finalizer")
+	It("should remove a lingering finalizer so deletion completes", func() {
+		By("creating a PortBinding that carries the finalizer")
 		pb := &tunnelv1alpha1.PortBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: "pb-del", Namespace: "default"},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "pb-del",
+				Namespace:  "default",
+				Finalizers: []string{portBindingFinalizer},
+			},
 			Spec: tunnelv1alpha1.PortBindingSpec{
 				EdgeNodeRef: tunnelv1alpha1.ObjectReference{Name: "del-node"},
 				Bindings: []tunnelv1alpha1.PortBindingDefinition{
@@ -138,26 +153,13 @@ var _ = Describe("PortBinding Controller", func() {
 		}
 		Expect(k8sClient.Create(ctx, pb)).To(Succeed())
 		pbKey := types.NamespacedName{Name: "pb-del", Namespace: "default"}
-		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: pbKey})
-		Expect(err).NotTo(HaveOccurred())
-
-		By("clearing the trigger label to observe it being re-applied on delete")
-		current := &tunnelv1alpha1.EdgeNode{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "del-node", Namespace: "default"}, current)).To(Succeed())
-		delete(current.Labels, portBindingTriggerLabel)
-		Expect(k8sClient.Update(ctx, current)).To(Succeed())
 
 		By("deleting the PortBinding (finalizer keeps it around)")
 		Expect(k8sClient.Delete(ctx, pb)).To(Succeed())
 
 		By("reconciling the deletion")
-		_, err = newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: pbKey})
+		_, err := newReconciler().Reconcile(ctx, reconcile.Request{NamespacedName: pbKey})
 		Expect(err).NotTo(HaveOccurred())
-
-		By("verifying the EdgeNode was triggered by the deletion")
-		updatedNode := &tunnelv1alpha1.EdgeNode{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "del-node", Namespace: "default"}, updatedNode)).To(Succeed())
-		Expect(updatedNode.Labels).To(HaveKeyWithValue(portBindingTriggerLabel, "pb-del"))
 
 		By("verifying the PortBinding is fully gone after the finalizer is removed")
 		gone := &tunnelv1alpha1.PortBinding{}
@@ -165,3 +167,13 @@ var _ = Describe("PortBinding Controller", func() {
 		Expect(errors.IsNotFound(err)).To(BeTrue())
 	})
 })
+
+// findCondition returns the condition with the given type or nil when absent.
+func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == condType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}

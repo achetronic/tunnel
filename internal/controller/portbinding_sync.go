@@ -16,54 +16,10 @@ limitations under the License.
 
 package controller
 
-import (
-	"context"
-
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/util/retry"
-
-	"github.com/achetronic/tunnel/api/v1alpha1"
-)
-
-// portBindingFinalizer guards a PortBinding so its deletion can nudge the
-// referenced EdgeNode to re-render (dropping the removed listeners) before the
-// object actually disappears.
+// portBindingFinalizer may be present on PortBindings in the cluster. Nothing
+// adds it: deletion visibility is guaranteed by the EdgeNodeReconciler's
+// direct watch on PortBindings, which enqueues the referenced EdgeNode on
+// delete events and re-renders the plan without the removed listeners. The
+// reconciler removes the finalizer from any object that carries it so such
+// PortBindings are never stuck in Terminating.
 const portBindingFinalizer = "tunnel.achetronic.com/portbinding-finalizer"
-
-// portBindingTriggerLabel is bumped on the referenced EdgeNode to trigger its
-// reconciliation whenever a PortBinding that targets it changes.
-const portBindingTriggerLabel = "tunnel.achetronic.com/last-portbinding-trigger"
-
-// triggerEdgeNode finds the EdgeNode referenced by the PortBinding and bumps a
-// trigger label so the EdgeNodeReconciler re-runs and rebuilds the aggregate
-// plan. The read-modify-write is wrapped in RetryOnConflict to survive
-// concurrent updates. If the referenced EdgeNode is not found the error is
-// ignored, allowing the operator to progress when resources are created or
-// deleted out of order.
-func (r *PortBindingReconciler) triggerEdgeNode(ctx context.Context, pb *v1alpha1.PortBinding) error {
-	nodeName := pb.Spec.EdgeNodeRef.Name
-	if nodeName == "" {
-		return nil
-	}
-	nodeNamespace := pb.Spec.EdgeNodeRef.Namespace
-	if nodeNamespace == "" {
-		nodeNamespace = pb.Namespace
-	}
-
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		var node v1alpha1.EdgeNode
-		if err := r.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: nodeNamespace}, &node); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
-			}
-			return err
-		}
-
-		if node.Labels == nil {
-			node.Labels = make(map[string]string)
-		}
-		node.Labels[portBindingTriggerLabel] = pb.Name
-		return r.Update(ctx, &node)
-	})
-}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/achetronic/tunnel/api/v1alpha1"
 	"github.com/achetronic/tunnel/internal/agentconfig"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // testVPSAddress is a documentation-range IP (RFC 5737) used as the EdgeNode
@@ -153,6 +154,36 @@ func TestBuildPlan(t *testing.T) {
 	_, err = BuildPlan(node, bindingsTunnelPort, resolver, "priv", "pub", keys)
 	if err == nil {
 		t.Fatal("expected tunnel port conflict error")
+	}
+
+	// Binding names key the Envoy listener and the SDS document path, so a
+	// duplicate across two PortBindings must be rejected even when the ports
+	// differ. Within one CR the CRD listMapKey already forbids it; this guards
+	// the cross-CR aggregate.
+	bindingsDupName := []v1alpha1.PortBinding{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "pb-a"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{ListenPort: 80, Name: "web", Target: v1alpha1.BindingTarget{Address: "10.0.0.1", Port: 80}},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "team-b", Name: "pb-b"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{ListenPort: 443, Name: "web", Target: v1alpha1.BindingTarget{Address: "10.0.0.2", Port: 443}},
+				},
+			},
+		},
+	}
+	_, err = BuildPlan(node, bindingsDupName, resolver, "priv", "pub", keys)
+	if err == nil {
+		t.Fatal("expected duplicate binding name error")
+	}
+	if !strings.Contains(err.Error(), "team-a/pb-a") || !strings.Contains(err.Error(), "team-b/pb-b") {
+		t.Fatalf("duplicate name error must identify both PortBindings, got: %v", err)
 	}
 
 	// Reserved infrastructure ports (TODO #18): the uplink readiness

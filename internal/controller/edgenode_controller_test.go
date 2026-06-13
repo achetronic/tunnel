@@ -411,13 +411,16 @@ var _ = Describe("EdgeNode Controller", func() {
 			Expect(edgeNodeEventPredicate.Update(updateAnnotationChange)).To(BeTrue())
 
 			By("4. Testing label change")
+			// Labels carry no plan input: PortBinding changes reach the
+			// reconciler through the direct PortBinding watch, so a label
+			// mutation must not re-enqueue the EdgeNode.
 			newNodeLabelChange := oldNode.DeepCopy()
 			newNodeLabelChange.Labels["app"] = "different"
 			updateLabelChange := event.UpdateEvent{
 				ObjectOld: oldNode,
 				ObjectNew: newNodeLabelChange,
 			}
-			Expect(edgeNodeEventPredicate.Update(updateLabelChange)).To(BeTrue())
+			Expect(edgeNodeEventPredicate.Update(updateLabelChange)).To(BeFalse())
 		})
 	})
 })
