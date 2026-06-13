@@ -27,6 +27,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerruntime "sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -70,6 +71,13 @@ type EdgeNodeReconciler struct {
 	// composed by the manager from --image-repo/--image-tag. Empty falls back to
 	// DefaultUplinkImage.
 	UplinkImage string
+	// MaxConcurrentReconciles bounds how many EdgeNodes reconcile in parallel.
+	// Each reconcile speaks SSH to its own VPS, so a single unreachable or
+	// slow host would otherwise occupy the only worker and stall every other
+	// node's reconcile (cert rotation, config rollout). Distinct EdgeNodes own
+	// disjoint VPSs and uplink namespaces, so parallel reconciles do not race.
+	// Zero falls back to defaultMaxConcurrentReconciles.
+	MaxConcurrentReconciles int
 }
 
 // +kubebuilder:rbac:groups=tunnel.achetronic.com,resources=edgenodes,verbs=get;list;watch;update;patch
@@ -206,7 +214,12 @@ func (r *EdgeNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// into every Event call; the classic recorder remains supported.
 		r.Recorder = mgr.GetEventRecorderFor("edgenode-controller") //nolint:staticcheck
 	}
+	maxConcurrent := r.MaxConcurrentReconciles
+	if maxConcurrent <= 0 {
+		maxConcurrent = defaultMaxConcurrentReconciles
+	}
 	return ctrl.NewControllerManagedBy(mgr).
+		WithOptions(controllerruntime.Options{MaxConcurrentReconciles: maxConcurrent}).
 		For(&v1alpha1.EdgeNode{}, builder.WithPredicates(edgeNodeEventPredicate)).
 		Watches(
 			&v1alpha1.PortBinding{},

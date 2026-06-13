@@ -71,8 +71,14 @@ spec:
                       minimum: 1
                       type: integer
                     name:
-                      description: Name is a unique identifier for this binding within
-                        the PortBinding CR.
+                      description: |-
+                        Name is a unique identifier for this binding within the PortBinding CR.
+                        It keys the Envoy listener and the per-binding SDS document path on the
+                        VPS, so it is constrained to a DNS-1123 label: lowercase alphanumerics
+                        and dashes, no slashes or dots, which would otherwise break the on-disk
+                        SDS path and the rendered config.
+                      maxLength: 63
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     protocol:
                       description: Protocol is TCP or UDP.

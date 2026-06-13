@@ -96,6 +96,10 @@ func main() {
 	var imageTag string
 	flag.StringVar(&imageTag, "image-tag", controller.DefaultImageTag,
 		"Tag for operator-managed images; set it to the operator version so the uplink tag matches.")
+	var maxConcurrentReconciles int
+	flag.IntVar(&maxConcurrentReconciles, "max-concurrent-reconciles", 5,
+		"How many EdgeNodes reconcile in parallel. Each reconcile speaks SSH to its own VPS, so a single "+
+			"unreachable host must not stall the others; raise it to roughly the managed VPS count.")
 	flag.Parse()
 
 	// Route controller-runtime's logr through the shared slog handler so the
@@ -195,11 +199,12 @@ func main() {
 	}
 
 	if err := (&controller.EdgeNodeReconciler{
-		Client:       mgr.GetClient(),
-		Scheme:       mgr.GetScheme(),
-		EnvoyVersion: envoyVersion,
-		TunnelctlDir: tunnelctlDir,
-		UplinkImage:  fmt.Sprintf("%s/uplink:%s", imageRepo, imageTag),
+		Client:                  mgr.GetClient(),
+		Scheme:                  mgr.GetScheme(),
+		EnvoyVersion:            envoyVersion,
+		TunnelctlDir:            tunnelctlDir,
+		UplinkImage:             fmt.Sprintf("%s/uplink:%s", imageRepo, imageTag),
+		MaxConcurrentReconciles: maxConcurrentReconciles,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "edgenode")
 		os.Exit(1)

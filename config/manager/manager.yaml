@@ -87,15 +87,17 @@ spec:
             port: 8081
           initialDelaySeconds: 5
           periodSeconds: 10
-        # TODO(user): Configure the resources accordingly based on the project requirements.
+        # The informer cache holds all Secrets cluster-wide (the reconciler reads SSH,
+        # uplink-key and TLS Secrets through the cached client), so memory scales with
+        # the cluster's Secret count. 256Mi gives headroom against OOM in large clusters.
         # More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
         resources:
           limits:
             cpu: 500m
-            memory: 128Mi
+            memory: 256Mi
           requests:
             cpu: 10m
-            memory: 64Mi
+            memory: 128Mi
         volumeMounts: []
       volumes: []
       serviceAccountName: controller-manager

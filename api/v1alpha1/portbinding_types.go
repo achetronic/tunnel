@@ -129,6 +129,12 @@ type TLSConfig struct {
 // PortBindingDefinition defines one exposed port and its routing.
 type PortBindingDefinition struct {
 	// Name is a unique identifier for this binding within the PortBinding CR.
+	// It keys the Envoy listener and the per-binding SDS document path on the
+	// VPS, so it is constrained to a DNS-1123 label: lowercase alphanumerics
+	// and dashes, no slashes or dots, which would otherwise break the on-disk
+	// SDS path and the rendered config.
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=63
 	// +required
 	Name string `json:"name"`
 

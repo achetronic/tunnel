@@ -176,15 +176,17 @@ securityContext:
     drop:
       - ALL
 
-# -- Resource requests and limits for the manager container.
+# -- Resource requests and limits for the manager container. The informer cache
+# holds all Secrets cluster-wide, so memory scales with the cluster Secret count;
+# 256Mi gives headroom against OOM in large clusters.
 # Ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 resources:
   limits:
     cpu: 500m
-    memory: 128Mi
+    memory: 256Mi
   requests:
     cpu: 10m
-    memory: 64Mi
+    memory: 128Mi
 
 # -- Node selector for the manager Pod.
 # Ref: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector

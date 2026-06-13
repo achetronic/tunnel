@@ -77,6 +77,13 @@ const (
 	// from the per-30s hammering the watch-driven model replaced.
 	defaultRequeueInterval = 3 * time.Minute
 
+	// defaultMaxConcurrentReconciles bounds parallel EdgeNode reconciles when the
+	// manager does not set --max-concurrent-reconciles. Each reconcile speaks SSH
+	// to its own VPS, so one worker would let a single unreachable host stall all
+	// other nodes; distinct EdgeNodes own disjoint VPSs and uplink namespaces, so
+	// running several at once does not race.
+	defaultMaxConcurrentReconciles = 5
+
 	// DefaultEnvoyVersion is the Envoy release installed on the VPS when the manager
 	// is not given an explicit --envoy-version. It is the single source of the
 	// default, reused as the flag default in cmd/main.go.
