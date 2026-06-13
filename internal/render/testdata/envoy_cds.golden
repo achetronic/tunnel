@@ -11,22 +11,35 @@ resources:
         healthy_threshold: 2
         http_health_check:
           path: /ready
-        transport_socket:
-          name: envoy.transport_sockets.raw_buffer
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+        # Empty criteria selects the plain (raw_buffer) transport_socket_match, so
+        # active health checks reach the readiness server without a PROXY header it
+        # would reject. Data-path endpoints select the proxy_protocol match via their
+        # metadata below.
+        transport_socket_match_criteria: {}
     # healthy_panic_threshold 0: hard-coded so Envoy fails fast when most or all uplinks are down.
     common_lb_config:
       healthy_panic_threshold:
         value: 0
-    transport_socket:
-      name: envoy.transport_sockets.upstream_proxy_protocol
-      typed_config:
-        "@type": type.googleapis.com/envoy.extensions.transport_sockets.proxy_protocol.v3.ProxyProtocolUpstreamTransport
-        config:
-          version: V1
+    transport_socket_matches:
+      - name: proxy_protocol
+        match:
+          proxy_protocol: true
+        transport_socket:
+          name: envoy.transport_sockets.upstream_proxy_protocol
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.proxy_protocol.v3.ProxyProtocolUpstreamTransport
+            config:
+              version: V1
+            transport_socket:
+              name: envoy.transport_sockets.raw_buffer
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+      - name: plain
+        match: {}
         transport_socket:
           name: envoy.transport_sockets.raw_buffer
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
     load_assignment:
       cluster_name: cluster_tcp_bind
       endpoints:
@@ -38,6 +51,10 @@ resources:
                     port_value: 443
                 health_check_config:
                   port_value: 8080
+              metadata:
+                filter_metadata:
+                  envoy.transport_socket_match:
+                    proxy_protocol: true
             - endpoint:
                 address:
                   socket_address:
@@ -45,6 +62,10 @@ resources:
                     port_value: 443
                 health_check_config:
                   port_value: 8080
+              metadata:
+                filter_metadata:
+                  envoy.transport_socket_match:
+                    proxy_protocol: true
   - "@type": type.googleapis.com/envoy.config.cluster.v3.Cluster
     name: cluster_udp_bind
     connect_timeout: 5s

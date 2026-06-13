@@ -143,30 +143,44 @@ const cdsTpl = `resources:
         http_health_check:
           path: /ready
         {{- if and (eq .Protocol "TCP") .TCP.ProxyProtocol }}
-        transport_socket:
-          name: envoy.transport_sockets.raw_buffer
-          typed_config:
-            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+        # Empty criteria selects the plain (raw_buffer) transport_socket_match, so
+        # active health checks reach the readiness server without a PROXY header it
+        # would reject. Data-path endpoints select the proxy_protocol match via their
+        # metadata below.
+        transport_socket_match_criteria: {}
         {{- end }}
     # healthy_panic_threshold 0: hard-coded so Envoy fails fast when most or all uplinks are down.
     common_lb_config:
       healthy_panic_threshold:
         value: 0
     {{- if and (eq .Protocol "TCP") .TCP.ProxyProtocol }}
-    transport_socket:
-      name: envoy.transport_sockets.upstream_proxy_protocol
-      typed_config:
-        "@type": type.googleapis.com/envoy.extensions.transport_sockets.proxy_protocol.v3.ProxyProtocolUpstreamTransport
-        config:
-          version: V1
+    transport_socket_matches:
+      - name: proxy_protocol
+        match:
+          proxy_protocol: true
+        transport_socket:
+          name: envoy.transport_sockets.upstream_proxy_protocol
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.proxy_protocol.v3.ProxyProtocolUpstreamTransport
+            config:
+              version: V1
+            transport_socket:
+              name: envoy.transport_sockets.raw_buffer
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
+      - name: plain
+        match: {}
         transport_socket:
           name: envoy.transport_sockets.raw_buffer
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.raw_buffer.v3.RawBuffer
     {{- end }}
     load_assignment:
       cluster_name: cluster_{{ .Name }}
       endpoints:
         - lb_endpoints:
 {{- $hcPort := .HealthCheck.Port }}
+{{- $proxy := and (eq .Protocol "TCP") .TCP.ProxyProtocol }}
 {{- range .Upstreams }}
             - endpoint:
                 address:
@@ -175,6 +189,12 @@ const cdsTpl = `resources:
                     port_value: {{ .Port }}
                 health_check_config:
                   port_value: {{ $hcPort }}
+              {{- if $proxy }}
+              metadata:
+                filter_metadata:
+                  envoy.transport_socket_match:
+                    proxy_protocol: true
+              {{- end }}
 {{- end }}
 {{- end }}
 {{- else }} []
