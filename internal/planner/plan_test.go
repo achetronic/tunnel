@@ -873,3 +873,69 @@ func TestBuildPlan_ProtocolAwarePortConflict(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildPlan_TLSSecretNamespaceResolution verifies that an offload binding
+// whose secretRef omits the namespace resolves to the owning PortBinding's
+// namespace (not left empty, which the controller would wrongly fall back to
+// the EdgeNode's namespace for), and that an explicit namespace is preserved.
+func TestBuildPlan_TLSSecretNamespaceResolution(t *testing.T) {
+	node := makeNode()
+	resolver := mockResolver{}
+	keys := map[int32]string{0: "pub0", 1: "pub1"}
+
+	bindings := []v1alpha1.PortBinding{
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-a", Name: "pb-omitted"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "web-omitted",
+						Protocol:   "TCP",
+						ListenPort: 443,
+						Target:     v1alpha1.BindingTarget{Address: "10.0.0.1", Port: 8443},
+						TLS: &v1alpha1.TLSConfig{
+							Mode:      "offload",
+							SecretRef: &v1alpha1.SecretReference{Name: "web-cert"},
+						},
+					},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "tenant-b", Name: "pb-explicit"},
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "web-explicit",
+						Protocol:   "TCP",
+						ListenPort: 8444,
+						Target:     v1alpha1.BindingTarget{Address: "10.0.0.2", Port: 8443},
+						TLS: &v1alpha1.TLSConfig{
+							Mode:      "offload",
+							SecretRef: &v1alpha1.SecretReference{Name: "shared-cert", Namespace: "shared-certs"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	plan, err := BuildPlan(node, bindings, resolver, "priv", "pub", keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := map[string]string{}
+	for _, m := range plan.TLSMaterials {
+		got[m.BindingName] = m.SecretNamespace
+	}
+
+	// The omitted namespace must resolve to the PortBinding namespace, never empty.
+	if got["web-omitted"] != "tenant-a" {
+		t.Fatalf("omitted secretRef namespace must resolve to the PortBinding namespace tenant-a, got %q", got["web-omitted"])
+	}
+	// An explicit namespace must be preserved verbatim.
+	if got["web-explicit"] != "shared-certs" {
+		t.Fatalf("explicit secretRef namespace must be preserved, got %q", got["web-explicit"])
+	}
+}

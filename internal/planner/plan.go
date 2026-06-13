@@ -100,7 +100,7 @@ func BuildPlan(
 		return nil, err
 	}
 
-	tlsMaterials, err := buildTLSMaterials(allDefs)
+	tlsMaterials, err := buildTLSMaterials(bindings)
 	if err != nil {
 		return nil, err
 	}
@@ -554,48 +554,69 @@ func applyProtocolDefaults(listener *render.EnvoyListener, def v1alpha1.PortBind
 // TLSMaterial entry for each binding that requires cert/key material to be
 // pushed to the VPS (offload and mutual modes). Passthrough bindings are
 // excluded because they never push a private key to the edge.
+// buildTLSMaterials iterates over the binding definitions and produces one
+// TLSMaterial entry for each binding that requires cert/key material to be
+// pushed to the VPS (offload and mutual modes). Passthrough bindings are
+// excluded because they never push a private key to the edge. It takes the
+// PortBindings (not the flattened defs) so an omitted secretRef namespace
+// resolves to the owning PortBinding's namespace, honoring the SecretReference
+// API contract; otherwise the namespace would be lost in the flatten step and
+// the controller would wrongly look in the EdgeNode's namespace.
 // The result is sorted by BindingName for deterministic output.
-func buildTLSMaterials(allDefs []v1alpha1.PortBindingDefinition) ([]TLSMaterial, error) {
+func buildTLSMaterials(bindings []v1alpha1.PortBinding) ([]TLSMaterial, error) {
 	var materials []TLSMaterial
-	for _, def := range allDefs {
-		if def.TLS == nil {
-			continue
-		}
-		switch def.TLS.Mode {
-		case "passthrough":
-			// No material to push; TLS bytes are forwarded as-is.
-			continue
-		case "offload":
-			if def.TLS.SecretRef == nil {
-				return nil, fmt.Errorf("binding %s: mode offload requires a secretRef", def.Name)
+	for _, pb := range bindings {
+		for _, def := range pb.Spec.Bindings {
+			if def.TLS == nil {
+				continue
 			}
-			materials = append(materials, TLSMaterial{
-				BindingName:     def.Name,
-				SecretName:      def.TLS.SecretRef.Name,
-				SecretNamespace: def.TLS.SecretRef.Namespace,
-				Mode:            "offload",
-				SDSPath:         tlsSDSPath(def.Name),
-				CertSecretName:  tlsCertSecretName(def.Name),
-			})
-		case "mutual":
-			if def.TLS.SecretRef == nil {
-				return nil, fmt.Errorf("binding %s: mode mutual requires a secretRef", def.Name)
+			switch def.TLS.Mode {
+			case "passthrough":
+				// No material to push; TLS bytes are forwarded as-is.
+				continue
+			case "offload":
+				if def.TLS.SecretRef == nil {
+					return nil, fmt.Errorf("binding %s: mode offload requires a secretRef", def.Name)
+				}
+				materials = append(materials, TLSMaterial{
+					BindingName:     def.Name,
+					SecretName:      def.TLS.SecretRef.Name,
+					SecretNamespace: tlsSecretNamespace(def.TLS.SecretRef.Namespace, pb.Namespace),
+					Mode:            "offload",
+					SDSPath:         tlsSDSPath(def.Name),
+					CertSecretName:  tlsCertSecretName(def.Name),
+				})
+			case "mutual":
+				if def.TLS.SecretRef == nil {
+					return nil, fmt.Errorf("binding %s: mode mutual requires a secretRef", def.Name)
+				}
+				materials = append(materials, TLSMaterial{
+					BindingName:     def.Name,
+					SecretName:      def.TLS.SecretRef.Name,
+					SecretNamespace: tlsSecretNamespace(def.TLS.SecretRef.Namespace, pb.Namespace),
+					Mode:            "mutual",
+					SDSPath:         tlsSDSPath(def.Name),
+					CertSecretName:  tlsCertSecretName(def.Name),
+					CASecretName:    tlsCASecretName(def.Name),
+				})
+			default:
+				return nil, fmt.Errorf("binding %s: unknown TLS mode %q", def.Name, def.TLS.Mode)
 			}
-			materials = append(materials, TLSMaterial{
-				BindingName:     def.Name,
-				SecretName:      def.TLS.SecretRef.Name,
-				SecretNamespace: def.TLS.SecretRef.Namespace,
-				Mode:            "mutual",
-				SDSPath:         tlsSDSPath(def.Name),
-				CertSecretName:  tlsCertSecretName(def.Name),
-				CASecretName:    tlsCASecretName(def.Name),
-			})
-		default:
-			return nil, fmt.Errorf("binding %s: unknown TLS mode %q", def.Name, def.TLS.Mode)
 		}
 	}
 	sort.Slice(materials, func(i, j int) bool {
 		return materials[i].BindingName < materials[j].BindingName
 	})
 	return materials, nil
+}
+
+// tlsSecretNamespace resolves the namespace a TLS Secret lives in: the explicit
+// secretRef namespace when set, otherwise the owning PortBinding's namespace,
+// matching the SecretReference contract that an omitted namespace defaults to
+// the owner's. It is never empty for a binding that carries a secretRef.
+func tlsSecretNamespace(refNamespace, ownerNamespace string) string {
+	if refNamespace != "" {
+		return refNamespace
+	}
+	return ownerNamespace
 }
