@@ -331,7 +331,8 @@ Deliberate, operator-driven switches you set with `kubectl annotate edgenode <na
 | `--tunnelctl-dir`                                                    | `/opt/tunnelctl`             | Directory the operator reads the static tunnelctl binaries from to push to the VPS. |
 | `--image-repo`                                                       | `ghcr.io/achetronic/tunnel`  | Base repo for operator-managed images; the uplink image is `<repo>/uplink:<tag>`.   |
 | `--image-tag`                                                        | `latest`                     | Tag for those images; set it to the operator version so the uplink tag matches.     |
-| `--leader-elect`                                                     | `false`                      | Leader election so only one manager is active (HA).                                 |
+| `--max-concurrent-reconciles`                                        | `5`                          | EdgeNodes reconciled in parallel; each speaks SSH to its own VPS.                    |
+| `--leader-elect`                                                     | `true`                       | Leader election so only one manager is active (HA).                                 |
 | `--health-probe-bind-address`                                        | `:8081`                      | Address for the liveness/readiness probes.                                          |
 | `--metrics-bind-address`                                             | `0` (off)                    | Metrics address, e.g. `:8443` (HTTPS) or `:8080` (HTTP).                            |
 | `--metrics-secure`                                                   | `true`                       | Serve metrics over HTTPS with authn/authz.                                          |
