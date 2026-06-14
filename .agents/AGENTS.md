@@ -2,7 +2,7 @@
 
 Tunnel is a Kubernetes operator that exposes arbitrary TCP/UDP ports on the public IP
 of one or more Linux VPS instances and routes that traffic back into a private cluster.
-The data path is: `internet → Envoy (VPS) → N WireGuard tunnels → uplink pods (DNAT) →
+The data path is: `internet -> Envoy (VPS) -> N WireGuard tunnels -> uplink pods (DNAT) ->
 ClusterIP/IP`. The operator is **control plane only** and never sits in the data path.
 Envoy active-health-checks each uplink's `/ready` (`:8080`) and only balances onto replicas
 whose tunnel is up; tune it via the optional `spec.edge.healthCheck` on the EdgeNode.
@@ -135,7 +135,7 @@ pure + deterministic:
 - `PortBindingReconciler` populates `PortBindingStatus` with `ObservedGeneration` and two
   conditions: `Programmed` (reason `Synced`, the trigger reached the EdgeNode) and `Ready`
   (True/reason `Applied` only once the EdgeNode's `status.appliedBindings` lists the
-  binding — i.e. the port is in the plan actually applied on the edge; `NotYetApplied` /
+  binding, i.e. the port is in the plan actually applied on the edge; `NotYetApplied` /
   `EdgeNodeNotFound` otherwise). GitOps tooling should gate on `Ready`. What it does NOT
   populate is `PortBindingStatus.ResolvedTargets`: target resolution lives in the planner
   during EdgeNode reconciliation and is reflected only in the rendered config and the
@@ -191,9 +191,9 @@ resources. Do NOT scaffold a webhook unless explicitly asked.
 
 ## Generated / Do-Not-Edit Files
 
-- `config/crd/bases/*.yaml`, `config/rbac/role.yaml` → from `make manifests`
-- `api/**/zz_generated.deepcopy.go` → from `make generate`
-- `PROJECT` → kubebuilder metadata (single-group `tunnel.achetronic.com/v1alpha1`,
+- `config/crd/bases/*.yaml`, `config/rbac/role.yaml`: from `make manifests`
+- `api/**/zz_generated.deepcopy.go`: from `make generate`
+- `PROJECT`: kubebuilder metadata (single-group `tunnel.achetronic.com/v1alpha1`,
   kinds `EdgeNode` + `PortBinding`)
 - Do not delete `// +kubebuilder:scaffold:*` markers.
 

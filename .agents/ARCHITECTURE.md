@@ -1,8 +1,6 @@
 # Architecture and Implementation Details
 
-Working document outlining the closed architecture, API, expected behavior, code structure, phases plan, required tests, and acceptance criteria. 
-
----
+Reference for the data path, API, controller behavior, code structure, required tests, and the closed design decisions.
 
 ## 1. Context and Objective
 
@@ -13,8 +11,6 @@ Expose arbitrary ports (TCP and UDP) on the public IP of one or more VPS and rou
 3. Maximum performance data path: kernel WireGuard as transport, Envoy as the sole userspace process, kernel NAT for final translation. The operator is only control plane and never participates in the data path.
 4. Trivial operation: enrolling a new machine = a Secret with SSH credentials + a CR. Exposing a port = a CR.
 5. Everything running on the VPS is readable and killable: one systemd unit (Envoy) plus the `tunnelctl` binary applying WireGuard natively, and config files. Zero custom daemons on the VPS.
-
----
 
 ## 2. Data path architecture
 
@@ -39,7 +35,7 @@ Each uplink replica is an independent WG peer with its own keypair and stable tu
 
 ### 2.2 VPS: Envoy proxy with upstreams
 
-Sole process with open public ports. The machine is assumed to be dedicated to this role. Envoy is bootstrapped once with an immutable `/etc/envoy/envoy.yaml` that defines the `admin` block and `dynamic_resources` pointing at file-based LDS/CDS (`path_config_source` -> `/etc/envoy/lds.yaml` and `/etc/envoy/cds.yaml`). The operator owns those three files and updates listeners/clusters via atomic `mv` of `.tmp` files, so Envoy hot-reloads without restarting (see DESIGN_AND_RULES §3). Sessions are sticky by client addr:port. Each cluster carries active health checks: Envoy probes every uplink replica's `/ready` endpoint (HTTP on the replica's `:8080`, selected per endpoint via `health_check_config.port_value` while traffic still targets the listen port) using the interval/timeout/thresholds from `spec.edge.healthCheck` (optional, defaults 5s/2s/2/2). The signal is protocol-agnostic (it probes the uplink readiness, not the data port), so it covers TCP, TLS and UDP listeners alike; a replica whose tunnel is down or whose nft/handshake readiness fails is taken out of rotation instead of black-holing traffic. When a TCP binding enables `proxyProtocol`, the cluster wraps upstream data connections in the PROXY protocol but the health check carries a `raw_buffer` transport-socket override so the probe to `/ready` is not prefixed with a PROXY header the plain readiness server would reject. The cluster is a `STATIC` type over the replicas' literal tunnel IPs (no DNS resolution on the VPS). `healthy_panic_threshold` is hard-coded to 0 so that when most or all replicas are unhealthy Envoy fails fast (`no healthy upstream`) rather than re-flooding dead tunnels. Envoy originates connections with `10.200.0.1`, so return traffic is symmetric without SNAT on the VPS. The admin interface binds to `10.200.0.1:9901` (reachable only over the tunnel).
+Sole process with open public ports. The machine is assumed to be dedicated to this role. Envoy is bootstrapped once with an immutable `/etc/envoy/envoy.yaml` that defines the `admin` block and `dynamic_resources` pointing at file-based LDS/CDS (`path_config_source` -> `/etc/envoy/lds.yaml` and `/etc/envoy/cds.yaml`). The operator owns those three files and updates listeners/clusters via atomic `mv` of `.tmp` files, so Envoy hot-reloads without restarting (see DESIGN_AND_RULES §3). Sessions are sticky by client addr:port. Each cluster carries active health checks: Envoy probes every uplink replica's `/ready` endpoint (HTTP on the replica's `:8080`, selected per endpoint via `health_check_config.port_value` while traffic still targets the listen port) using the interval/timeout/thresholds from `spec.edge.healthCheck` (optional, defaults 5s/2s/2/2). The signal is protocol-agnostic (it probes the uplink readiness, not the data port), so it covers TCP, TLS and UDP listeners alike; a replica whose tunnel is down or whose nft/handshake readiness fails is taken out of rotation instead of black-holing traffic. When a TCP binding enables `proxyProtocol`, the cluster declares `transport_socket_matches`: data-path endpoints select the PROXY-protocol wrapper through endpoint metadata, while the active health check sets an empty `transport_socket_match_criteria` that selects the plain `raw_buffer` match, so the probe to `/ready` is not prefixed with a PROXY header the readiness server would reject. The cluster is a `STATIC` type over the replicas' literal tunnel IPs (no DNS resolution on the VPS). `healthy_panic_threshold` is hard-coded to 0 so that when most or all replicas are unhealthy Envoy fails fast (`no healthy upstream`) rather than re-flooding dead tunnels. Envoy originates connections with `10.200.0.1`, so return traffic is symmetric without SNAT on the VPS. The admin interface binds to `10.200.0.1:9901` (reachable only over the tunnel).
 
 ### 2.3 Cluster: Uplink replicas
 
@@ -51,8 +47,6 @@ The masquerade does not destroy the client's real IP at the application level be
 
 - The VPS never receives the WireGuard private keys of the cluster, nor the keys of the transported protocols: it is a blind relay. Its own WG private key is generated locally in-cluster with `wgctrl` and stored in a Secret; the relay's private key is delivered to the VPS only inside the `tunnelctl` desired-state document (0600) and never leaves via keygen on the host.
 - The single, explicit exception is **TLS edge termination** (`offload`/`mutual` modes on a PortBinding, see §3.2 and §4.4). There the user deliberately opts in to terminating TLS on the VPS, which requires the server certificate's private key to live on the edge. The operator surfaces this with a `PrivateKeyOnEdge` warning Event the first time the key is pushed. `passthrough` mode keeps this rule intact: it only inspects SNI and forwards the still-encrypted stream, so no key ever leaves the cluster.
-
----
 
 ## 3. API Details
 
@@ -72,8 +66,6 @@ A TCP binding may carry an optional `tls` block: `{ mode, secretRef }`. A single
 - `mutual`: same as `offload` plus downstream mTLS verification of the client certificate; additionally reads `ca.crt` and renders `require_client_certificate` + a validation context. Verification happens at the VPS edge; traffic toward the uplink stays in clear (the operator does not do mTLS to the upstream).
 
 Validation is split: CEL on the CRD enforces the spec shape (`tls` only on TCP bindings; `secretRef` required when mode is `offload`/`mutual`). The presence of the right keys *inside* the Secret cannot be checked at admission, so it is validated at runtime during EdgeNode reconciliation (reason `TLSSecretIncomplete` on the Ready condition when a Secret or a required key is missing).
-
----
 
 ## 4. Controller Behavior
 
@@ -103,21 +95,17 @@ The uplink image is the generic `tunnelctl` agent (same binary the edge uses), d
 - The StatefulSet runs `tunnelctl run --config /etc/tunnel/uplink.json --transforms /etc/tunnelctl/uplink.transforms.yaml`. The config is the shared desired-state template from the mounted ConfigMap (same for every replica); the transforms are a baked-in CEL document that fills each replica's identity at runtime (`internal/configtransform`): it parses the ordinal from `POD_NAME`, derives the tunnel address with `cidrHost(network, 2 + ordinal)`, and reads the private key from the per-ordinal file under `KEYS_DIR` (the mounted keys Secret).
 - `tunnelctl run` applies WireGuard + nftables natively, watches the ConfigMap and re-applies (re-running the transforms, so identity stays consistent) on change, and serves the readiness endpoint on `:8080`. Readiness reports 200 only once a full apply (WireGuard AND nftables) has succeeded, the config watcher is active, and the WireGuard handshake is fresh, so a replica with WireGuard up but no DNAT rules is never put in rotation. If the config watcher cannot be maintained (inotify limits exhausted), the agent exits so the kubelet restarts the pod instead of running blind with stale config.
 
----
-
 ## 5. Code Structure and Decoupling
 
 The reconcile loop DOES NOT contain business logic.
 - `internal/planner`, `internal/render`, `internal/ipam`, `internal/agentconfig`, and `internal/provision`: zero dependencies on controller-runtime/client-go.
 - `internal/agentconfig` is the shared JSON desired-state contract (WireGuard + optional nftables) the planner produces and `tunnelctl` consumes. `internal/wg` (netlink + wgctrl) and `internal/nftables` (`google/nftables`) apply it natively; `internal/agentrun` is the shared apply/status/run core behind `tunnelctl` (used by both the edge oneshot and the uplink daemon).
 - `internal/configtransform` is a generic CEL postprocessor: it applies a `{path, expr}` rules document on top of a config before it is parsed, with helper functions (`getenv`, `readFile`, `fromJSON`, `fromYAML`, `cidrHost`). The uplink uses it to resolve per-replica identity declaratively, so there is no bespoke uplink binary.
-- All renders deterministic: `internal/render` now covers only the Envoy LDS/CDS (the three TLS listener shapes included); the WireGuard and nftables text renders are gone, replaced by the structured `agentconfig` documents applied natively.
+- All renders deterministic: `internal/render` covers the Envoy LDS/CDS (including the three TLS listener shapes). WireGuard and nftables are not text-rendered; they are applied natively from the structured `agentconfig` documents.
 - `internal/version` holds the operator version stamped via `-ldflags`, logged at startup.
 - `sshexec.Executor` is the only boundary with the machine.
 - A single point writes to the VPS (`EdgeNodeReconciler`).
 - Inside `internal/controller`, files are split by ownership so it stays obvious what is kubebuilder scaffolding versus our logic: `*_controller.go` holds the kubebuilder-generated surface (the Reconciler struct, `Reconcile`, `SetupWithManager`, RBAC markers); `*_sync.go` holds our reconcile logic (enrollment flow, status, resolver, constants); `*_utils.go` holds auxiliary helpers (ensure/createOrUpdate/TLS/Secret-mapping).
-
----
 
 ## 6. Required Tests
 
@@ -135,8 +123,6 @@ The reconcile loop DOES NOT contain business logic.
 
 ### 6.3 E2E
 - Full end-to-end traffic tests with actual containers.
-
----
 
 ## 7. Closed Decisions (Do not reopen)
 
