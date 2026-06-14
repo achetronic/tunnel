@@ -704,4 +704,37 @@ var _ = Describe("EdgeNode uplink namespace ownership collision check", func() {
 		Expect(cond).NotTo(BeNil())
 		Expect(cond.Reason).NotTo(Equal("UplinkNamespaceCollision"))
 	})
+
+	It("does not delete uplink resources owned by another EdgeNode during teardown", func() {
+		nodeName := "col-del-node"
+
+		// A keys Secret in the shared namespace owned by an EdgeNode in tenant-a.
+		foreignSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      nodeName + "-uplink-keys",
+				Namespace: sharedUplinkNamespace,
+				Labels: map[string]string{
+					"tunnel.achetronic.com/owner-namespace": "tenant-a",
+				},
+			},
+			StringData: map[string]string{"priv-0": "keepme"},
+		}
+		Expect(k8sClient.Create(ctx, foreignSecret)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, foreignSecret) })
+
+		// A same-named EdgeNode in tenant-b tearing down must not delete tenant-a's Secret.
+		nodeB := &tunnelv1alpha1.EdgeNode{
+			ObjectMeta: metav1.ObjectMeta{Name: nodeName, Namespace: "tenant-b"},
+			Spec: tunnelv1alpha1.EdgeNodeSpec{
+				Uplink: tunnelv1alpha1.UplinkSpec{Namespace: sharedUplinkNamespace, Replicas: 1},
+			},
+		}
+		r := &EdgeNodeReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		Expect(r.deleteUplinkResources(ctx, nodeB)).To(Succeed())
+
+		// The foreign Secret must still exist.
+		kept := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName + "-uplink-keys", Namespace: sharedUplinkNamespace}, kept)).To(Succeed())
+		Expect(kept.Labels["tunnel.achetronic.com/owner-namespace"]).To(Equal("tenant-a"))
+	})
 })

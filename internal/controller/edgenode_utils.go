@@ -401,11 +401,55 @@ func (r *EdgeNodeReconciler) deleteUplinkResources(ctx context.Context, node *v1
 		},
 	}
 	for _, obj := range objs {
+		// Never delete a resource owned by a different EdgeNode. Two EdgeNodes of
+		// the same name in different namespaces that share an uplink namespace map
+		// to identical resource names; tearing one down must not destroy the
+		// other's live uplink. Read the current object and skip it when its
+		// owner-namespace label names another EdgeNode. Resources without the
+		// label predate the guard and are treated as owned so upgrades still clean
+		// up.
+		if foreign, err := r.uplinkResourceForeign(ctx, obj, node.Namespace); err != nil {
+			return err
+		} else if foreign {
+			if r.Recorder != nil {
+				r.Recorder.Event(node, corev1.EventTypeWarning, "UplinkNamespaceCollision",
+					fmt.Sprintf("skipped deleting %T %s/%s owned by another EdgeNode", obj, obj.GetNamespace(), obj.GetName()))
+			}
+			continue
+		}
 		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete %T %s/%s: %w", obj, obj.GetNamespace(), obj.GetName(), err)
 		}
 	}
 	return nil
+}
+
+// uplinkResourceForeign reports whether the existing object carries an
+// owner-namespace label that names an EdgeNode namespace other than ownerNS.
+// A missing object (NotFound) or one without the label is not foreign, so a
+// normal teardown and an upgrade from before the label both proceed to delete.
+func (r *EdgeNodeReconciler) uplinkResourceForeign(ctx context.Context, obj client.Object, ownerNS string) (bool, error) {
+	var current client.Object
+	switch obj.(type) {
+	case *appsv1.StatefulSet:
+		current = &appsv1.StatefulSet{}
+	case *corev1.Service:
+		current = &corev1.Service{}
+	case *corev1.ConfigMap:
+		current = &corev1.ConfigMap{}
+	case *corev1.Secret:
+		current = &corev1.Secret{}
+	default:
+		return false, nil
+	}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to read %T %s/%s before delete: %w", obj, obj.GetNamespace(), obj.GetName(), err)
+	}
+	owner, ok := current.GetLabels()[uplinkOwnerNamespaceLabel]
+	return ok && owner != ownerNS, nil
 }
 
 // tlsSecretIncompleteReason is the Ready condition reason emitted when a
