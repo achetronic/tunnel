@@ -13,9 +13,10 @@ import (
 
 func LabelsForNode(node *v1alpha1.EdgeNode) map[string]string {
 	return map[string]string{
-		"app.kubernetes.io/name":       "uplink",
-		"app.kubernetes.io/instance":   node.Name,
-		"app.kubernetes.io/managed-by": "tunnel",
+		"app.kubernetes.io/name":                "uplink",
+		"app.kubernetes.io/instance":            node.Name,
+		"app.kubernetes.io/managed-by":          "tunnel",
+		"tunnel.achetronic.com/owner-namespace": node.Namespace,
 	}
 }
 
@@ -64,6 +65,10 @@ func BuildKeysSecret(node *v1alpha1.EdgeNode, keys map[int32]string) *corev1.Sec
 // purely for identity.
 func BuildHeadlessService(node *v1alpha1.EdgeNode) *corev1.Service {
 	labels := LabelsForNode(node)
+	selectorLabels := make(map[string]string)
+	maps.Copy(selectorLabels, labels)
+	delete(selectorLabels, "tunnel.achetronic.com/owner-namespace")
+
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-uplink", node.Name),
@@ -72,7 +77,7 @@ func BuildHeadlessService(node *v1alpha1.EdgeNode) *corev1.Service {
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
-			Selector:  labels,
+			Selector:  selectorLabels,
 		},
 	}
 }
@@ -91,6 +96,10 @@ func BuildStatefulSet(node *v1alpha1.EdgeNode, image string, pullPolicy corev1.P
 	maps.Copy(podLabels, labels)
 	maps.Copy(podLabels, node.Spec.Uplink.Labels)
 
+	selectorLabels := make(map[string]string)
+	maps.Copy(selectorLabels, labels)
+	delete(selectorLabels, "tunnel.achetronic.com/owner-namespace")
+
 	podAnnotations := make(map[string]string)
 	maps.Copy(podAnnotations, node.Spec.Uplink.Annotations)
 
@@ -100,7 +109,7 @@ func BuildStatefulSet(node *v1alpha1.EdgeNode, image string, pullPolicy corev1.P
 			PodAntiAffinity: &corev1.PodAntiAffinity{
 				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
 					{
-						LabelSelector: &metav1.LabelSelector{MatchLabels: labels},
+						LabelSelector: &metav1.LabelSelector{MatchLabels: selectorLabels},
 						TopologyKey:   "kubernetes.io/hostname",
 					},
 				},
@@ -116,7 +125,7 @@ func BuildStatefulSet(node *v1alpha1.EdgeNode, image string, pullPolicy corev1.P
 		},
 		Spec: appsv1.StatefulSetSpec{
 			Replicas:    &replicas,
-			Selector:    &metav1.LabelSelector{MatchLabels: labels},
+			Selector:    &metav1.LabelSelector{MatchLabels: selectorLabels},
 			ServiceName: fmt.Sprintf("%s-uplink", node.Name),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{

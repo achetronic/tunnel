@@ -34,6 +34,7 @@ import (
 
 	tunnelv1alpha1 "github.com/achetronic/tunnel/api/v1alpha1"
 	"github.com/achetronic/tunnel/internal/sshexec"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 // activeServiceOutput is the systemctl output for a running service.
@@ -529,5 +530,178 @@ var _ = Describe("collectBindings namespace isolation", func() {
 		got, err = r.collectBindings(ctx, node("shared", "cb-nsb"))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got).To(BeEmpty())
+	})
+})
+
+var _ = Describe("EdgeNode uplink namespace ownership collision check", func() {
+	ctx := context.Background()
+
+	const sharedUplinkNamespace = "tunnel"
+
+	BeforeEach(func() {
+		// Ensure namespaces exist
+		for _, n := range []string{"tenant-a", "tenant-b", sharedUplinkNamespace} {
+			nsObj := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: n}}
+			if err := k8sClient.Create(ctx, nsObj); err != nil && !errors.IsAlreadyExists(err) {
+				Expect(err).NotTo(HaveOccurred())
+			}
+		}
+	})
+
+	It("fails reconciliation with UplinkNamespaceCollision and does not overwrite existing resources if owner namespace mismatch", func() {
+		nodeName := "col-node"
+
+		privKey, _ := wgtypes.GeneratePrivateKey()
+
+		// Pre-create the keys Secret in the shared namespace "tunnel", owned by "tenant-a"
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      nodeName + "-uplink-keys",
+				Namespace: sharedUplinkNamespace,
+				Labels: map[string]string{
+					"tunnel.achetronic.com/owner-namespace": "tenant-a",
+				},
+			},
+			StringData: map[string]string{
+				"priv-0": privKey.String(),
+			},
+		}
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+		// Create EdgeNode in namespace "tenant-b" targeting the same "tunnel" uplink namespace
+		edgeNodeTenantB := &tunnelv1alpha1.EdgeNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      nodeName,
+				Namespace: "tenant-b",
+			},
+			Spec: tunnelv1alpha1.EdgeNodeSpec{
+				Address: "198.51.100.11",
+				SSH: tunnelv1alpha1.SSHSpec{
+					SecretRef: tunnelv1alpha1.SecretReference{
+						Name: "fake-secret", // Not actually used since preflight fails before SSH dialing
+					},
+				},
+				Uplink: tunnelv1alpha1.UplinkSpec{
+					Namespace: sharedUplinkNamespace,
+					Replicas:  1,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, edgeNodeTenantB)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, edgeNodeTenantB) })
+
+		// Reconcile tenant-b EdgeNode
+		r := &EdgeNodeReconciler{
+			Client:       k8sClient,
+			Scheme:       k8sClient.Scheme(),
+			TunnelctlDir: tunnelctlTestDir,
+		}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      nodeName,
+				Namespace: "tenant-b",
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Fetch the reconciled EdgeNode and assert condition
+		reconciledB := &tunnelv1alpha1.EdgeNode{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: "tenant-b"}, reconciledB)).To(Succeed())
+
+		cond := meta.FindStatusCondition(reconciledB.Status.Conditions, "Ready")
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+		Expect(cond.Reason).To(Equal("UplinkNamespaceCollision"))
+		Expect(cond.Message).To(ContainSubstring("tenant-a"))
+
+		// Check that the secret was NOT modified (contains original data)
+		fetchedSecret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName + "-uplink-keys", Namespace: sharedUplinkNamespace}, fetchedSecret)).To(Succeed())
+		Expect(string(fetchedSecret.Data["priv-0"])).To(Equal(privKey.String()))
+	})
+
+	It("succeeds reconciliation if the owner namespace matches", func() {
+		nodeName := "col-node-match"
+
+		privKey, _ := wgtypes.GeneratePrivateKey()
+
+		// Pre-create the keys Secret in the shared namespace "tunnel", owned by "tenant-a"
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      nodeName + "-uplink-keys",
+				Namespace: sharedUplinkNamespace,
+				Labels: map[string]string{
+					"tunnel.achetronic.com/owner-namespace": "tenant-a",
+				},
+			},
+			StringData: map[string]string{
+				"priv-0": privKey.String(),
+			},
+		}
+		Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, secret) })
+
+		// Create SSH secret for "tenant-a"
+		sshSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "fake-secret",
+				Namespace: "tenant-a",
+			},
+			Data: map[string][]byte{
+				"password": []byte("test"),
+			},
+		}
+		Expect(k8sClient.Create(ctx, sshSecret)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, sshSecret) })
+
+		// Create EdgeNode in namespace "tenant-a" targeting "tunnel" uplink namespace
+		edgeNodeTenantA := &tunnelv1alpha1.EdgeNode{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      nodeName,
+				Namespace: "tenant-a",
+			},
+			Spec: tunnelv1alpha1.EdgeNodeSpec{
+				Address: "198.51.100.12",
+				SSH: tunnelv1alpha1.SSHSpec{
+					SecretRef: tunnelv1alpha1.SecretReference{
+						Name: "fake-secret",
+					},
+				},
+				Uplink: tunnelv1alpha1.UplinkSpec{
+					Namespace: sharedUplinkNamespace,
+					Replicas:  1,
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, edgeNodeTenantA)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, edgeNodeTenantA) })
+
+		// Reconcile tenant-a EdgeNode (with fake executor to let provision proceed)
+		r := &EdgeNodeReconciler{
+			Client:       k8sClient,
+			Scheme:       k8sClient.Scheme(),
+			TunnelctlDir: tunnelctlTestDir,
+			ExecutorFactory: func(ctx context.Context, node *tunnelv1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error) {
+				return healthyFakeExecutor(), nil
+			},
+		}
+
+		_, err := r.Reconcile(ctx, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      nodeName,
+				Namespace: "tenant-a",
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+
+		// Fetch the reconciled EdgeNode and assert condition is Ready (or at least not UplinkNamespaceCollision)
+		reconciledA := &tunnelv1alpha1.EdgeNode{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName, Namespace: "tenant-a"}, reconciledA)).To(Succeed())
+
+		cond := meta.FindStatusCondition(reconciledA.Status.Conditions, "Ready")
+		Expect(cond).NotTo(BeNil())
+		Expect(cond.Reason).NotTo(Equal("UplinkNamespaceCollision"))
 	})
 })

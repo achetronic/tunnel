@@ -321,6 +321,56 @@ func (r *EdgeNodeReconciler) createOrUpdateStatefulSet(ctx context.Context, sts 
 	return err
 }
 
+// uplinkOwnerNamespaceLabel records, on every in-cluster uplink resource, the
+// namespace of the EdgeNode that owns it. The reconciler reads it to refuse
+// adopting resources another EdgeNode created when two EdgeNodes of the same
+// name share an uplink namespace.
+const uplinkOwnerNamespaceLabel = "tunnel.achetronic.com/owner-namespace"
+
+// checkUplinkOwnership verifies that the uplink StatefulSet and keys Secret in
+// the target namespace, if they already exist, are owned by this EdgeNode. It
+// returns collision=true with a Ready=False condition when an existing resource
+// carries an owner-namespace label that differs from this EdgeNode's namespace,
+// so a name clash in a shared uplink namespace fails loudly instead of silently
+// overwriting another tenant's resources. Resources without the label predate
+// this guard and are treated as owned, so an upgrade never trips a false alarm.
+func (r *EdgeNodeReconciler) checkUplinkOwnership(ctx context.Context, node *v1alpha1.EdgeNode, namespace string) (status metav1.ConditionStatus, reason, msg string, err error, collision bool) {
+	foreignOwner := func(labels map[string]string) (string, bool) {
+		owner, ok := labels[uplinkOwnerNamespaceLabel]
+		return owner, ok && owner != node.Namespace
+	}
+
+	var sts appsv1.StatefulSet
+	stsErr := r.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-uplink", node.Name), Namespace: namespace}, &sts)
+	if stsErr == nil {
+		if owner, foreign := foreignOwner(sts.Labels); foreign {
+			m := fmt.Sprintf("uplink StatefulSet in namespace %s is owned by an EdgeNode in namespace %s", namespace, owner)
+			if r.Recorder != nil {
+				r.Recorder.Event(node, corev1.EventTypeWarning, "UplinkNamespaceCollision", m)
+			}
+			return metav1.ConditionFalse, "UplinkNamespaceCollision", m, nil, true
+		}
+	} else if !apierrors.IsNotFound(stsErr) {
+		return metav1.ConditionFalse, "StatefulSetReadFailed", fmt.Sprintf("Failed to read existing uplink StatefulSet: %v", stsErr), stsErr, true
+	}
+
+	var secret corev1.Secret
+	secretErr := r.Get(ctx, types.NamespacedName{Name: fmt.Sprintf("%s-uplink-keys", node.Name), Namespace: namespace}, &secret)
+	if secretErr == nil {
+		if owner, foreign := foreignOwner(secret.Labels); foreign {
+			m := fmt.Sprintf("uplink keys Secret in namespace %s is owned by an EdgeNode in namespace %s", namespace, owner)
+			if r.Recorder != nil {
+				r.Recorder.Event(node, corev1.EventTypeWarning, "UplinkNamespaceCollision", m)
+			}
+			return metav1.ConditionFalse, "UplinkNamespaceCollision", m, nil, true
+		}
+	} else if !apierrors.IsNotFound(secretErr) {
+		return metav1.ConditionFalse, "SecretReadFailed", fmt.Sprintf("Failed to read existing uplink keys Secret: %v", secretErr), secretErr, true
+	}
+
+	return metav1.ConditionTrue, "", "", nil, false
+}
+
 // closeExecutor closes the SSH executor if it implements io.Closer, logging any
 // error instead of silently discarding it.
 func closeExecutor(exec sshexec.Executor, logger logr.Logger) {

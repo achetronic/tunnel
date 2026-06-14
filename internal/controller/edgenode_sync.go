@@ -269,6 +269,17 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 	logger := log.FromContext(ctx)
 	logger.Info("reconciling EdgeNode", "address", node.Spec.Address, "generation", node.Generation)
 
+	// The uplink namespace default is guaranteed by the CRD marker
+	// (UplinkSpec.Namespace has +kubebuilder:default="tunnel").
+	keysNamespace := node.Spec.Uplink.Namespace
+
+	// Refuse to touch uplink resources that another EdgeNode already owns, so a
+	// name clash in a shared uplink namespace fails loudly instead of silently
+	// overwriting another tenant's StatefulSet and Secrets.
+	if status, reason, msg, err, collision := r.checkUplinkOwnership(ctx, node, keysNamespace); collision {
+		return status, reason, msg, err
+	}
+
 	logger.Info("connecting to the VPS over SSH", "address", node.Spec.Address)
 	exec, err := r.getSSHExecutor(ctx, node)
 	if err != nil {
@@ -284,10 +295,6 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 	if replicas <= 0 {
 		replicas = 1
 	}
-
-	// The uplink namespace default is guaranteed by the CRD marker
-	// (UplinkSpec.Namespace has +kubebuilder:default="tunnel").
-	keysNamespace := node.Spec.Uplink.Namespace
 
 	logger.Info("ensuring uplink WireGuard keys", "replicas", replicas, "namespace", keysNamespace)
 	keysSecret, err := r.ensureUplinkKeys(ctx, node, replicas, keysNamespace)
