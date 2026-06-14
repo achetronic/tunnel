@@ -21,6 +21,7 @@ import (
 	"context"
 	"slices"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -74,6 +75,8 @@ func (r *PortBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, nil
 	}
 
+	prevStatus := pb.Status.DeepCopy()
+
 	pb.Status.ObservedGeneration = pb.Generation
 	// Programmed records that this reconciler observed the spec; the
 	// EdgeNodeReconciler's PortBinding watch rebuilds the aggregate plan. It
@@ -97,6 +100,14 @@ func (r *PortBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		Message:            msg,
 		ObservedGeneration: pb.Generation,
 	})
+
+	if equality.Semantic.DeepEqual(prevStatus, &pb.Status) {
+		if evalErr != nil {
+			return ctrl.Result{}, evalErr
+		}
+		return ctrl.Result{}, nil
+	}
+
 	if err := r.Status().Update(ctx, &pb); err != nil {
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, nil
