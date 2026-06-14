@@ -31,9 +31,8 @@ func hostKeyCallback(cfg Config) (ssh.HostKeyCallback, error) {
 // that accepts the connection only if the presented host key matches the pinned
 // key for that hostname.
 func knownHostsCallback(data []byte) (ssh.HostKeyCallback, error) {
-	// First, run a lightweight pre-validation pass to preserve existing behavior:
-	// - malformed data returns a "failed to parse knownHosts: ..." error
-	// - empty/zero entries returns a "no host keys found in knownHosts data" error
+	// Pre-validate the blob so malformed data or an empty entry set fails with an
+	// explicit error before it reaches the temp file and knownhosts.New.
 	var parsedAny bool
 	rest := data
 	for {

@@ -395,17 +395,13 @@ func applyEnvoyConfig(ctx context.Context, exec sshexec.Executor, plan *planner.
 	return nil
 }
 
-// ensureEnvoyRunning deploys the static bootstrap config that points Envoy at
-// the LDS/CDS files and makes sure the service is active. To prevent unnecessary
-// restarts of a live Envoy in steady state, we perform a remote-compare of the
-// remote bootstrap configuration.
-// If the bootstrap configuration is missing or differs from the desired content,
-// we Put the new bootstrap and issue systemctl enable envoy && systemctl restart envoy
-// because Envoy only reads its bootstrap configuration at startup. For default-network
-// nodes, the bootstrap content is byte-identical, which guarantees that upgrading
-// the operator causes zero restarts.
-// If the configuration is identical, we skip Put and only start the service if
-// it is not active.
+// ensureEnvoyRunning installs the static bootstrap that points Envoy at the
+// LDS/CDS files and makes sure the service is active. Envoy reads its bootstrap
+// only at startup, so it is rewritten and the service restarted only when the
+// bootstrap on the VPS differs from the desired one; an Envoy whose bootstrap
+// already matches is left running so steady-state reconciles never bounce live
+// connections. On default-network nodes the bootstrap is byte-identical across
+// operator versions, so an upgrade triggers no restart.
 func ensureEnvoyRunning(ctx context.Context, exec sshexec.Executor, plan *planner.Plan) error {
 	slog.Info("enroll: ensuring envoy is running")
 	if plan == nil {

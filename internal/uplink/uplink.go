@@ -52,12 +52,6 @@ func BuildKeysSecret(node *v1alpha1.EdgeNode, keys map[int32]string) *corev1.Sec
 	}
 }
 
-// BuildStatefulSet returns the StatefulSet that maintains the uplink peers. The
-// container image and its pull policy are passed in (composed by the controller
-// from the --image-repo/--image-tag flags) rather than hardcoded. Tunnel
-// parameters (network, MTU, keepalive, the relay endpoint and public key) are no
-// longer passed as environment: they live in the desired-state document mounted
-// from the ConfigMap, which each replica completes with its own identity.
 // BuildHeadlessService renders the headless Service the uplink StatefulSet's
 // spec.serviceName points at, satisfying the StatefulSet's per-pod DNS
 // identity contract. Same name/namespace/labels as the StatefulSet, ClusterIP
@@ -82,6 +76,12 @@ func BuildHeadlessService(node *v1alpha1.EdgeNode) *corev1.Service {
 	}
 }
 
+// BuildStatefulSet returns the StatefulSet that maintains the uplink peers. The
+// image and pull policy are passed in by the controller (the image is composed
+// from its --image-repo/--image-tag flags). Tunnel parameters (network, MTU,
+// keepalive, the relay endpoint and public key) are not container environment:
+// they live in the desired-state document mounted from the ConfigMap, which each
+// replica completes with its own identity.
 func BuildStatefulSet(node *v1alpha1.EdgeNode, image string, pullPolicy corev1.PullPolicy) *appsv1.StatefulSet {
 	replicas := node.Spec.Uplink.Replicas
 	if replicas <= 0 {

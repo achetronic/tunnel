@@ -1,8 +1,7 @@
 // Package nftables programs the uplink DNAT and masquerade ruleset natively
 // through netlink (github.com/google/nftables), so the uplink needs no `nft`
-// binary. It is the structured equivalent of the legacy text ruleset rendered
-// by internal/render/nft.go. The kernel rule semantics are validated against a
-// real uplink; the helpers that translate config into expressions are pure.
+// binary. The kernel rule semantics are validated against a real uplink; the
+// helpers that translate config into expressions are pure.
 package nftables
 
 import (

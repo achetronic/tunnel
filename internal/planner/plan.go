@@ -582,19 +582,14 @@ func normalizeEnvoyDuration(s string) (string, error) {
 	return fmt.Sprintf("%ds", int64(d.Seconds())), nil
 }
 
-// buildTLSMaterials iterates over the binding definitions and produces one
-// TLSMaterial entry for each binding that requires cert/key material to be
-// pushed to the VPS (offload and mutual modes). Passthrough bindings are
-// excluded because they never push a private key to the edge.
-// buildTLSMaterials iterates over the binding definitions and produces one
-// TLSMaterial entry for each binding that requires cert/key material to be
-// pushed to the VPS (offload and mutual modes). Passthrough bindings are
-// excluded because they never push a private key to the edge. It takes the
-// PortBindings (not the flattened defs) so an omitted secretRef namespace
-// resolves to the owning PortBinding's namespace, honoring the SecretReference
-// API contract; otherwise the namespace would be lost in the flatten step and
-// the controller would wrongly look in the EdgeNode's namespace.
-// The result is sorted by BindingName for deterministic output.
+// buildTLSMaterials produces one TLSMaterial entry for each binding that needs
+// cert/key material pushed to the VPS (offload and mutual modes). Passthrough
+// bindings are excluded because they never push a private key to the edge. It
+// takes the PortBindings, not the flattened defs, so an omitted secretRef
+// namespace resolves to the owning PortBinding's namespace per the
+// SecretReference API contract; flattening first would lose it and the
+// controller would look in the EdgeNode's namespace instead. The result is
+// sorted by BindingName for deterministic output.
 func buildTLSMaterials(bindings []v1alpha1.PortBinding) ([]TLSMaterial, error) {
 	var materials []TLSMaterial
 	for _, pb := range bindings {

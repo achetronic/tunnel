@@ -1,8 +1,7 @@
 // Command tunnelctl applies and inspects a tunnel node's desired state from a
 // JSON document: WireGuard (always) and nftables (uplink only). It runs the same
 // core on both sides. The edge invokes "apply"/"status" once over SSH; "run" is
-// the daemon mode (watch the config and serve a readiness endpoint). A later
-// iteration will add an optional Envoy section (.agents/TODO.md item 4).
+// the daemon mode (watch the config and serve a readiness endpoint).
 package main
 
 import (
