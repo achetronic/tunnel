@@ -371,6 +371,15 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 		r.Recorder.Event(node, corev1.EventTypeNormal, "Provisioned", "VPS enrolled and provisioned successfully")
 	}
 
+	// Record what the VPS now serves as soon as the enroll succeeds, before the
+	// in-cluster uplink workload and the health check. These two fields describe
+	// the plan materialized on the edge, so a later failure creating the uplink
+	// ConfigMap/Service/StatefulSet or probing health must not leave them stale:
+	// otherwise PortBindings stay stuck in NotYetApplied and the next reconcile
+	// sees a phantom config drift and re-pushes over SSH needlessly.
+	node.Status.AppliedConfigHash = appliedConfigHash(plan.PlanHash, tlsFiles)
+	node.Status.AppliedBindings = appliedBindingKeys(bindings)
+
 	// Honour a one-shot restart request (the restart-envoy annotation, already
 	// consumed by Reconcile). This applies a new Envoy binary that the running
 	// service would not otherwise pick up.
@@ -439,9 +448,7 @@ func (r *EdgeNodeReconciler) handleReconciliation(ctx context.Context, node *v1a
 	}
 
 	node.Status.PublicKey = vpsPubKey
-	node.Status.AppliedConfigHash = appliedConfigHash(plan.PlanHash, tlsFiles)
 	node.Status.Uplink = newUplinks
-	node.Status.AppliedBindings = appliedBindingKeys(bindings)
 
 	return r.evaluateReadiness(ctx, node, health, sts, replicas)
 }

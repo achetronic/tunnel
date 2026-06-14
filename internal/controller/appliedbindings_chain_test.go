@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -150,5 +151,58 @@ var _ = Describe("AppliedBindings end-to-end chain", func() {
 		Expect(ready).NotTo(BeNil())
 		Expect(ready.Status).To(Equal(metav1.ConditionTrue))
 		Expect(ready.Reason).To(Equal("Applied"))
+	})
+
+	It("records appliedBindings even when an in-cluster step fails after a successful enroll", func() {
+		// Pre-create the uplink StatefulSet with a selector that differs from the
+		// one the operator renders. A StatefulSet selector is immutable, so the
+		// reconcile's createOrUpdateStatefulSet fails AFTER the SSH enroll has
+		// already materialized the binding on the VPS. The status must still carry
+		// appliedBindings so the PortBinding can reach Ready and the next reconcile
+		// does not see a phantom drift.
+		// A StatefulSet selector is immutable, so an existing uplink StatefulSet
+		// with a foreign selector makes the reconcile's createOrUpdateStatefulSet
+		// fail AFTER the SSH enroll already materialized the binding on the VPS.
+		// Remove any uplink StatefulSet a prior spec left behind so this case owns
+		// a clean slate, then plant the conflicting one.
+		stsKey := types.NamespacedName{Name: nodeName + "-uplink", Namespace: "tunnel"}
+		stale := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: stsKey.Name, Namespace: stsKey.Namespace}}
+		_ = k8sClient.Delete(ctx, stale)
+		Eventually(func() bool {
+			return errors.IsNotFound(k8sClient.Get(ctx, stsKey, &appsv1.StatefulSet{}))
+		}, "10s", "200ms").Should(BeTrue())
+
+		conflicting := &appsv1.StatefulSet{
+			ObjectMeta: metav1.ObjectMeta{Name: stsKey.Name, Namespace: stsKey.Namespace},
+			Spec: appsv1.StatefulSetSpec{
+				ServiceName: nodeName + "-uplink",
+				Selector:    &metav1.LabelSelector{MatchLabels: map[string]string{"foreign": "selector"}},
+				Template: corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"foreign": "selector"}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "busybox"}}},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, conflicting)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, conflicting) })
+
+		edgeReconciler := &EdgeNodeReconciler{
+			Client:       k8sClient,
+			Scheme:       k8sClient.Scheme(),
+			TunnelctlDir: tunnelctlTestDir,
+			ExecutorFactory: func(ctx context.Context, node *tunnelv1alpha1.EdgeNode, secret *corev1.Secret) (sshexec.Executor, error) {
+				return healthyFakeExecutor(), nil
+			},
+		}
+
+		By("running the EdgeNode sync: the StatefulSet update must fail after enroll")
+		_, err := edgeReconciler.Reconcile(ctx, reconcile.Request{NamespacedName: nodeKey})
+		Expect(err).To(HaveOccurred())
+
+		By("verifying appliedBindings was still persisted despite the later failure")
+		node := &tunnelv1alpha1.EdgeNode{}
+		Expect(k8sClient.Get(ctx, nodeKey, node)).To(Succeed())
+		Expect(node.Status.AppliedBindings).To(ContainElement("default/" + pbName))
+		Expect(node.Status.AppliedConfigHash).NotTo(BeEmpty())
 	})
 })
