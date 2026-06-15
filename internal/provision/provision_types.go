@@ -3,11 +3,11 @@ package provision
 import "time"
 
 // State models the applied configuration hashes stored on the VPS in
-// /etc/tunnel-operator/state.json. It lets Enroll skip work that is already
+// /etc/tunnel/state.json. It lets Enroll skip work that is already
 // in place, keeping the operation idempotent.
 type State struct {
 	// RelayDocumentHash is the hash of the last applied tunnelctl relay document
-	// (/etc/tunnel-operator/relay.json), the native replacement for the old
+	// (/etc/tunnel/relay.json), the native replacement for the old
 	// wg-relay.conf flow.
 	RelayDocumentHash string `json:"relayDocumentHash"`
 	// TunnelctlHash is the SHA-256 of the tunnelctl binary last pushed to the

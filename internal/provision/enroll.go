@@ -21,7 +21,7 @@ import (
 const (
 	// relayDocumentPath is where the relay's tunnelctl desired-state document is
 	// staged on the VPS.
-	relayDocumentPath = "/etc/tunnel-operator/relay.json"
+	relayDocumentPath = "/etc/tunnel/relay.json"
 	// tunnelctlBinPath is where the tunnelctl binary is installed on the VPS.
 	tunnelctlBinPath = "/usr/local/bin/tunnelctl"
 	// envoyBinPath is the absolute path to the Envoy binary on the VPS.
@@ -67,7 +67,7 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 	}
 
 	// Clean up stale temporary files from interrupted transfers in designated directories.
-	sweepCmd := "find /usr/local/bin /etc/tunnel-operator /etc/envoy /etc/envoy/tls /etc/systemd/system -maxdepth 1 -name '.tunnel.*' -delete 2>/dev/null || true"
+	sweepCmd := "find /usr/local/bin /etc/tunnel /etc/envoy /etc/envoy/tls /etc/systemd/system -maxdepth 1 -name '.tunnel.*' -delete 2>/dev/null || true"
 	if _, err := exec.Run(ctx, sweepCmd); err != nil {
 		slog.Warn("enroll: failed to sweep stale temporary files", "error", err)
 	}
@@ -333,8 +333,8 @@ func applyRelayDocument(ctx context.Context, exec sshexec.Executor, plan *planne
 	}
 	slog.Info("enroll: applying relay document via tunnelctl")
 
-	if _, err := exec.Run(ctx, "mkdir -p /etc/tunnel-operator"); err != nil {
-		return fmt.Errorf("failed to create tunnel-operator dir: %w", err)
+	if _, err := exec.Run(ctx, "mkdir -p /etc/tunnel"); err != nil {
+		return fmt.Errorf("failed to create tunnel dir: %w", err)
 	}
 
 	tmp := relayDocumentPath + ".tmp"
@@ -518,7 +518,7 @@ func waitEnvoyActive(ctx context.Context, exec sshexec.Executor) error {
 // with isExitError. Any returned error is left unwrapped at the SSH layer so
 // that classification stays possible.
 func readState(ctx context.Context, exec sshexec.Executor) (*State, error) {
-	out, err := exec.Run(ctx, "cat /etc/tunnel-operator/state.json")
+	out, err := exec.Run(ctx, "cat /etc/tunnel/state.json")
 	if err != nil {
 		return nil, err
 	}
@@ -533,14 +533,14 @@ func readState(ctx context.Context, exec sshexec.Executor) (*State, error) {
 // writeState marshals st and persists it atomically to the VPS, creating the
 // operator directory first.
 func writeState(ctx context.Context, exec sshexec.Executor, st *State) error {
-	if _, err := exec.Run(ctx, "mkdir -p /etc/tunnel-operator"); err != nil {
-		return fmt.Errorf("failed to create tunnel-operator dir: %w", err)
+	if _, err := exec.Run(ctx, "mkdir -p /etc/tunnel"); err != nil {
+		return fmt.Errorf("failed to create tunnel dir: %w", err)
 	}
 	b, err := json.Marshal(st)
 	if err != nil {
 		return fmt.Errorf("failed to marshal state: %w", err)
 	}
-	return exec.Put(ctx, "/etc/tunnel-operator/state.json", b)
+	return exec.Put(ctx, "/etc/tunnel/state.json", b)
 }
 
 // tlsDirPath is the directory on the VPS holding the per-binding SDS documents.

@@ -73,11 +73,11 @@ func TestEnroll_Idempotent(t *testing.T) {
 			// Binary already present, so a version-matching reconcile skips install.
 			return "", nil
 		}
-		if strings.Contains(cmd, "cat /etc/tunnel-operator/state.json") {
-			if _, ok := fake.Files["/etc/tunnel-operator/state.json"]; !ok {
+		if strings.Contains(cmd, "cat /etc/tunnel/state.json") {
+			if _, ok := fake.Files["/etc/tunnel/state.json"]; !ok {
 				return "", &ssh.ExitError{}
 			}
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		}
 		if strings.Contains(cmd, "tunnelctl status") {
 			return relayStatusJSON, nil
@@ -113,7 +113,7 @@ func TestEnroll_Idempotent(t *testing.T) {
 	}
 
 	// The relay document is staged to a temp path before the atomic rename.
-	if string(fake.Files["/etc/tunnel-operator/relay.json.tmp"]) != `{"version":1}` {
+	if string(fake.Files["/etc/tunnel/relay.json.tmp"]) != `{"version":1}` {
 		t.Fatal("relay document not staged")
 	}
 
@@ -185,11 +185,11 @@ func TestEnroll_PartialFail(t *testing.T) {
 		if strings.Contains(cmd, "uname -m") {
 			return unameX8664, nil
 		}
-		if strings.Contains(cmd, "cat /etc/tunnel-operator/state.json") {
-			if _, ok := fake.Files["/etc/tunnel-operator/state.json"]; !ok {
+		if strings.Contains(cmd, "cat /etc/tunnel/state.json") {
+			if _, ok := fake.Files["/etc/tunnel/state.json"]; !ok {
 				return "", &ssh.ExitError{}
 			}
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		}
 		if strings.Contains(cmd, "tunnelctl status") {
 			// Relay not ready yet, but no transport error.
@@ -221,7 +221,7 @@ func TestEnroll_PartialFail(t *testing.T) {
 
 	// The relay hash is persisted before the envoy step, so a later failure does
 	// not lose the relay progress.
-	stateStr := string(fake.Files["/etc/tunnel-operator/state.json"])
+	stateStr := string(fake.Files["/etc/tunnel/state.json"])
 	if !strings.Contains(stateStr, "relayhash") {
 		t.Fatal("relay document hash not persisted")
 	}
@@ -234,7 +234,7 @@ func TestEnroll_TransportErrorIsFatal(t *testing.T) {
 	fake := sshexec.NewFakeExecutor()
 
 	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
-		if strings.Contains(cmd, "cat /etc/tunnel-operator/state.json") {
+		if strings.Contains(cmd, "cat /etc/tunnel/state.json") {
 			// State file absent: an exit error, the normal first-enroll case.
 			return "", &ssh.ExitError{}
 		}
@@ -288,7 +288,7 @@ func TestTeardown(t *testing.T) {
 		"systemctl daemon-reload",
 		"rm -rf /etc/envoy",
 		"rm -f /etc/sysctl.d/99-tunnel.conf",
-		"rm -rf /etc/tunnel-operator",
+		"rm -rf /etc/tunnel",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("teardown did not run %q; ran:\n%s", want, joined)
@@ -305,7 +305,7 @@ func TestEnroll_BootstrapCustomIP(t *testing.T) {
 			return unameX8664, nil
 		case strings.Contains(cmd, "test -x "+tunnelctlBinPath):
 			return "", nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
 			return "", &ssh.ExitError{}
 		case strings.Contains(cmd, "tunnelctl status"):
 			return relayStatusJSON, nil
@@ -365,7 +365,7 @@ func TestEnroll_BootstrapDiffRestartsEnvoy(t *testing.T) {
 			return unameX8664, nil
 		case strings.Contains(cmd, "test -x "+tunnelctlBinPath):
 			return "", nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
 			return "", &ssh.ExitError{}
 		case strings.Contains(cmd, "tunnelctl status"):
 			return relayStatusJSON, nil
@@ -434,7 +434,7 @@ dynamic_resources:
 			return "", nil
 		case strings.Contains(cmd, "envoy --version"):
 			return testEnvoyVersion1301, nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
 			return "", &ssh.ExitError{}
 		case strings.Contains(cmd, "tunnelctl status"):
 			return relayStatusJSON, nil
@@ -491,7 +491,7 @@ func TestEnroll_EmptyRelayIPFails(t *testing.T) {
 			return unameX8664, nil
 		case strings.Contains(cmd, "test -x "+tunnelctlBinPath):
 			return "", nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
 			return "", &ssh.ExitError{}
 		case strings.Contains(cmd, "tunnelctl status"):
 			return relayStatusJSON, nil
@@ -531,7 +531,7 @@ func TestEnroll_TunnelctlHashMismatch_PushesBinary(t *testing.T) {
 	// Since the local fixture binary "fake-tunnelctl" hash is:
 	// e7397bcaae209695d27f7ecb24fc00eb2490a7937a570233ce48aa1294b6ad4e
 	// we will set a different hash ("diff-hash") in the mocked state.
-	fake.Files["/etc/tunnel-operator/state.json"] = []byte(
+	fake.Files["/etc/tunnel/state.json"] = []byte(
 		`{"relayDocumentHash":"r","tunnelctlHash":"diff-hash","envoyVersion":"1.30.1","envoyLdsHash":"l","envoyCdsHash":"c","tlsHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)
 
 	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
@@ -547,8 +547,8 @@ func TestEnroll_TunnelctlHashMismatch_PushesBinary(t *testing.T) {
 		case strings.Contains(cmd, "cat /etc/envoy/envoy.yaml"):
 			// Return identical bootstrap so Envoy ensure running skips restart.
 			return testBootstrap10_200_0_1, nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		default:
 			return "", nil
 		}
@@ -582,7 +582,7 @@ func TestEnroll_EnvoyVersionMismatch_InstallsAndRestarts(t *testing.T) {
 	fake := sshexec.NewFakeExecutor()
 
 	// All state and plan hashes match, VPS is healthy, but Envoy version in state differs.
-	fake.Files["/etc/tunnel-operator/state.json"] = []byte(
+	fake.Files["/etc/tunnel/state.json"] = []byte(
 		`{"relayDocumentHash":"r","tunnelctlHash":"e7397bcaae209695d27f7ecb24fc00eb2490a7937a570233ce48aa1294b6ad4e","envoyVersion":"1.30.1","envoyLdsHash":"l","envoyCdsHash":"c","tlsHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)
 
 	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
@@ -599,8 +599,8 @@ func TestEnroll_EnvoyVersionMismatch_InstallsAndRestarts(t *testing.T) {
 		case strings.Contains(cmd, "cat /etc/envoy/envoy.yaml"):
 			// Return identical bootstrap.
 			return testBootstrap10_200_0_1, nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		default:
 			return "", nil
 		}
@@ -640,7 +640,7 @@ func TestEnroll_FullSteadyState_EarlyExits(t *testing.T) {
 	fake := sshexec.NewFakeExecutor()
 
 	// All state and plan fields match exactly.
-	fake.Files["/etc/tunnel-operator/state.json"] = []byte(
+	fake.Files["/etc/tunnel/state.json"] = []byte(
 		`{"relayDocumentHash":"r","tunnelctlHash":"e7397bcaae209695d27f7ecb24fc00eb2490a7937a570233ce48aa1294b6ad4e","envoyVersion":"1.30.1","envoyLdsHash":"l","envoyCdsHash":"c","tlsHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)
 
 	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
@@ -651,8 +651,8 @@ func TestEnroll_FullSteadyState_EarlyExits(t *testing.T) {
 			return relayStatusJSON, nil
 		case strings.Contains(cmd, "systemctl is-active"):
 			return activeServiceLine, nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		default:
 			return "", nil
 		}
@@ -682,7 +682,7 @@ func TestEnroll_FullSteadyState_EarlyExits(t *testing.T) {
 		}
 	}
 
-	// The state file must NOT have been rewritten (no extra Puts on /etc/tunnel-operator/state.json).
+	// The state file must NOT have been rewritten (no extra Puts on /etc/tunnel/state.json).
 	for cmd := range fake.Files {
 		if strings.Contains(cmd, "tmp") {
 			t.Errorf("did not expect any temporary files, got: %s", cmd)
@@ -694,7 +694,7 @@ func TestEnroll_BackfillEnvoyVersion_NoDownloadNoRestart_PersistsVersion(t *test
 	fake := sshexec.NewFakeExecutor()
 
 	// Initial state has empty EnvoyVersion (representing pre-existing VPS).
-	fake.Files["/etc/tunnel-operator/state.json"] = []byte(
+	fake.Files["/etc/tunnel/state.json"] = []byte(
 		`{"relayDocumentHash":"r","tunnelctlHash":"e7397bcaae209695d27f7ecb24fc00eb2490a7937a570233ce48aa1294b6ad4e","envoyVersion":"","envoyLdsHash":"l","envoyCdsHash":"c","tlsHash":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}`)
 
 	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
@@ -711,8 +711,8 @@ func TestEnroll_BackfillEnvoyVersion_NoDownloadNoRestart_PersistsVersion(t *test
 		case strings.Contains(cmd, "cat /etc/envoy/envoy.yaml"):
 			// Return identical bootstrap.
 			return testBootstrap10_200_0_1, nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		default:
 			return "", nil
 		}
@@ -748,7 +748,7 @@ func TestEnroll_BackfillEnvoyVersion_NoDownloadNoRestart_PersistsVersion(t *test
 	}
 
 	// Assert EnvoyVersion is backfilled/persisted in the written state.json.
-	stateBytes, ok := fake.Files["/etc/tunnel-operator/state.json"]
+	stateBytes, ok := fake.Files["/etc/tunnel/state.json"]
 	if !ok {
 		t.Fatal("expected state.json to be persisted, but it was not")
 	}
@@ -857,7 +857,7 @@ func TestEnroll_CorruptedStateReEnrolls(t *testing.T) {
 		if strings.Contains(cmd, "uname -m") {
 			return unameX8664, nil
 		}
-		if strings.Contains(cmd, "cat /etc/tunnel-operator/state.json") {
+		if strings.Contains(cmd, "cat /etc/tunnel/state.json") {
 			// Return a corrupted JSON string.
 			return "{corrupted-json", nil
 		}
@@ -922,11 +922,11 @@ func TestEnroll_RebootSurvivalAndConfigOrder(t *testing.T) {
 			return unameX8664, nil
 		case strings.Contains(cmd, "test -x "+tunnelctlBinPath):
 			return "", nil
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
-			if _, ok := fake.Files["/etc/tunnel-operator/state.json"]; !ok {
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
+			if _, ok := fake.Files["/etc/tunnel/state.json"]; !ok {
 				return "", &ssh.ExitError{}
 			}
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		case strings.Contains(cmd, "tunnelctl status"):
 			return relayStatusJSON, nil
 		case strings.Contains(cmd, "systemctl is-active"):

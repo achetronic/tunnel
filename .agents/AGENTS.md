@@ -185,8 +185,7 @@ resources. Do NOT scaffold a webhook unless explicitly asked.
   repeated deterministic-render calls already asserted once.
 - **English only** for all code, comments, logs, docs.
 - **Product naming:** the product is **Tunnel**. Do not reintroduce `tunnel-operator` in
-  user-facing names. The on-disk VPS path `/etc/tunnel-operator/` is an intentional,
-  stable internal detail, leave it.
+  user-facing names, labels, paths or docs.
 - **No leaking concrete use cases** in product docs.
 
 ## Generated / Do-Not-Edit Files

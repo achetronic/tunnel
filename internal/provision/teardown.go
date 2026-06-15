@@ -51,8 +51,8 @@ func Teardown(ctx context.Context, exec sshexec.Executor) error {
 	}
 
 	// Operator state (state.json, vps.priv)
-	if _, err := exec.Run(ctx, "rm -rf /etc/tunnel-operator"); err != nil {
-		return fmt.Errorf("failed to remove tunnel-operator dir: %w", err)
+	if _, err := exec.Run(ctx, "rm -rf /etc/tunnel"); err != nil {
+		return fmt.Errorf("failed to remove tunnel dir: %w", err)
 	}
 
 	return nil

@@ -92,13 +92,13 @@ func TestEnroll_TLSRotationReloadsViaSDS(t *testing.T) {
 
 	// State already in place for everything except the TLS material: relay,
 	// LDS and CDS hashes match the plan, only tlsHash differs (a rotation).
-	fake.Files["/etc/tunnel-operator/state.json"] = []byte(
+	fake.Files["/etc/tunnel/state.json"] = []byte(
 		`{"relayDocumentHash":"r","tunnelctlHash":"e7397bcaae209695d27f7ecb24fc00eb2490a7937a570233ce48aa1294b6ad4e","envoyVersion":"1.30.1","envoyLdsHash":"l","envoyCdsHash":"c","tlsHash":"old"}`)
 
 	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
 		switch {
-		case strings.Contains(cmd, "cat /etc/tunnel-operator/state.json"):
-			return string(fake.Files["/etc/tunnel-operator/state.json"]), nil
+		case strings.Contains(cmd, "cat /etc/tunnel/state.json"):
+			return string(fake.Files["/etc/tunnel/state.json"]), nil
 		case strings.Contains(cmd, "cat /etc/envoy/envoy.yaml"):
 			return testBootstrap10_200_0_1, nil
 		case strings.Contains(cmd, "uname -m"):
