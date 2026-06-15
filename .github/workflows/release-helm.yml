@@ -100,12 +100,13 @@ jobs:
       - name: Package the chart
         env:
           VERSION: ${{ steps.meta.outputs.version }}
+          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           set -euo pipefail
           mkdir -p dist
           helm package "${CHART_DIR}" \
             --version "$VERSION" \
-            --app-version "$VERSION" \
+            --app-version "$TAG" \
             --destination dist
 
       - name: Log in to the OCI registry

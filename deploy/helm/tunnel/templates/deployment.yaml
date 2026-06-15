@@ -64,6 +64,13 @@ spec:
             - --{{ kebabcase $k }}={{ $v }}
             {{- end }}
             {{- end }}
+            {{- if not (hasKey .Values.flags "leaderElectNamespace") }}
+            # Leader-election Lease lives in the release namespace, where the
+            # chart creates the leader-election Role/RoleBinding. Without this
+            # the manager defaults to "default" and is denied the lease there.
+            # Override by setting flags.leaderElectNamespace explicitly.
+            - --leader-elect-namespace={{ .Release.Namespace }}
+            {{- end }}
             {{- if $hasMetricsTLS }}
             # Metrics TLS cert path (see the volume mounted below).
             # Ref: https://github.com/achetronic/tunnel/blob/main/config/default/cert_metrics_manager_patch.yaml

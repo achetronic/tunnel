@@ -7,8 +7,9 @@ type: application
 version: 0.1.0
 
 # Operator version. When image.tag is empty the controller image uses this tag,
-# so CI should stamp it (or set image.tag) before a real release.
-appVersion: "0.0.0"
+# so it must match the image tag scheme (the "v" prefix). CI stamps it from the
+# release tag (e.g. v0.3.0) at package time.
+appVersion: "v0.0.0"
 
 # Needs 1.25+ for CEL validation rules and coordination.k8s.io/v1 leases.
 kubeVersion: ">= 1.25.0-0"

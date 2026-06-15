@@ -34,6 +34,10 @@ flags:
   # -- Leader election so a single replica reconciles at a time (--leader-elect).
   # Ref: https://kubernetes.io/docs/concepts/cluster-administration/controller-manager/#leader-election
   leaderElect: true
+  # -- Namespace for the leader-election Lease (--leader-elect-namespace). When
+  # unset the chart defaults it to the release namespace, where it creates the
+  # leader-election Role/RoleBinding. Set it only to place the Lease elsewhere.
+  # leaderElectNamespace: ""
   # -- Address the health/readiness probe server binds to (--health-probe-bind-address).
   # The Deployment probes derive their port from this value.
   healthProbeBindAddress: ":8081"
