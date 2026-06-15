@@ -333,6 +333,7 @@ Deliberate, operator-driven switches you set with `kubectl annotate edgenode <na
 | `--image-tag`                                                        | `latest`                     | Tag for those images; set it to the operator version so the uplink tag matches.     |
 | `--max-concurrent-reconciles`                                        | `5`                          | EdgeNodes reconciled in parallel; each speaks SSH to its own VPS.                    |
 | `--leader-elect`                                                     | `true`                       | Leader election so only one manager is active (HA).                                 |
+| `--leader-elect-namespace`                                           | `default`                    | Namespace for the leader election Lease; set it when running outside a cluster.     |
 | `--health-probe-bind-address`                                        | `:8081`                      | Address for the liveness/readiness probes.                                          |
 | `--metrics-bind-address`                                             | `0` (off)                    | Metrics address, e.g. `:8443` (HTTPS) or `:8080` (HTTP).                            |
 | `--metrics-secure`                                                   | `true`                       | Serve metrics over HTTPS with authn/authz.                                          |
