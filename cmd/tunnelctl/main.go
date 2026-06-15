@@ -63,7 +63,7 @@ func parseFlags(name string, args []string) (configFile, transformsFile, healthA
 	tr := fs.String("transforms", "", "optional CEL transforms document applied to the config before use")
 	var ha *string
 	if name == "run" {
-		ha = fs.String("health-addr", ":8080", "address for the readiness server")
+		ha = fs.String("health-addr", ":40500", "address for the readiness server")
 	}
 	if err := fs.Parse(args); err != nil {
 		return "", "", "", err
@@ -71,7 +71,7 @@ func parseFlags(name string, args []string) (configFile, transformsFile, healthA
 	if *cfg == "" {
 		return "", "", "", fmt.Errorf("--config is required")
 	}
-	addr := ":8080"
+	addr := ":40500"
 	if ha != nil {
 		addr = *ha
 	}

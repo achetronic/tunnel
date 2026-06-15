@@ -26,7 +26,7 @@ func TestRenderEnvoyLDSAndCDS(t *testing.T) {
 					Timeout:            "2s",
 					HealthyThreshold:   2,
 					UnhealthyThreshold: 2,
-					Port:               8080,
+					Port:               40500,
 				},
 			},
 			{
@@ -44,7 +44,7 @@ func TestRenderEnvoyLDSAndCDS(t *testing.T) {
 					Timeout:            "2s",
 					HealthyThreshold:   2,
 					UnhealthyThreshold: 2,
-					Port:               8080,
+					Port:               40500,
 				},
 			},
 		},

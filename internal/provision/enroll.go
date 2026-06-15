@@ -421,7 +421,7 @@ admin:
   address:
     socket_address:
       address: %s
-      port_value: 9901
+      port_value: 40600
 
 dynamic_resources:
   lds_config:

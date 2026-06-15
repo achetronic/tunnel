@@ -149,6 +149,9 @@ func BuildStatefulSet(node *v1alpha1.EdgeNode, image string, pullPolicy corev1.P
 								"run",
 								"--config", "/etc/tunnel/uplink.json",
 								"--transforms", "/etc/tunnelctl/uplink.transforms.yaml",
+								// The readiness server port must match the probe below and
+								// the port Envoy health-checks (planner.uplinkReadinessPort).
+								"--health-addr", ":40500",
 							},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
@@ -161,7 +164,7 @@ func BuildStatefulSet(node *v1alpha1.EdgeNode, image string, pullPolicy corev1.P
 								ProbeHandler: corev1.ProbeHandler{
 									HTTPGet: &corev1.HTTPGetAction{
 										Path: "/ready",
-										Port: intstr.FromInt(8080),
+										Port: intstr.FromInt(40500),
 									},
 								},
 								PeriodSeconds:    5,

@@ -188,7 +188,7 @@ func TestBuildPlan(t *testing.T) {
 
 	// Reserved infrastructure ports (TODO #18): the uplink readiness
 	// endpoint and the Envoy admin/metrics port must be rejected.
-	for _, port := range []int32{8080, 9901} {
+	for _, port := range []int32{40500, 40600} {
 		bindingsReserved := []v1alpha1.PortBinding{
 			{
 				Spec: v1alpha1.PortBindingSpec{
@@ -407,7 +407,7 @@ func TestBuildPlanErrorCases(t *testing.T) {
 
 // TestResolveEnvoyHealthCheck_Defaults verifies that a zero-value HealthCheckSpec
 // yields the sane defaults: interval 5s, timeout 2s, healthy 2, unhealthy 2,
-// port uplinkReadinessPort (8080).
+// port uplinkReadinessPort (40500).
 func TestResolveEnvoyHealthCheck_Defaults(t *testing.T) {
 	hc := resolveEnvoyHealthCheck(v1alpha1.HealthCheckSpec{})
 	if hc.Interval != "5s" {
@@ -453,7 +453,7 @@ func TestResolveEnvoyHealthCheck_NonDefault(t *testing.T) {
 
 // TestBuildPlan_HealthCheckDefaults verifies that a default EdgeNode (zero
 // HealthCheckSpec) produces a CDS output that contains the sane defaults
-// (interval 5s, timeout 2s, unhealthy 2, healthy 2, port 8080).
+// (interval 5s, timeout 2s, unhealthy 2, healthy 2, port 40500).
 func TestBuildPlan_HealthCheckDefaults(t *testing.T) {
 	node := makeNode()
 	// node.Spec.Edge.HealthCheck is zero-valued; defaults must apply.
@@ -485,7 +485,7 @@ func TestBuildPlan_HealthCheckDefaults(t *testing.T) {
 		"interval: 5s",
 		"unhealthy_threshold: 2",
 		"healthy_threshold: 2",
-		"port_value: 8080",
+		"port_value: 40500",
 	} {
 		if !strings.Contains(cds, want) {
 			t.Errorf("CDS must contain %q;\nCDS:\n%s", want, cds)
@@ -690,8 +690,8 @@ func TestBuildPlan_UplinkDocument(t *testing.T) {
 	if doc.Nftables.Metrics == nil {
 		t.Fatal("nftables metrics must be set")
 	}
-	if doc.Nftables.Metrics.Port != 9901 || doc.Nftables.Metrics.RelayAddress != "10.200.0.1" {
-		t.Errorf("nftables metrics = %+v, want {Port:9901 RelayAddress:10.200.0.1}", doc.Nftables.Metrics)
+	if doc.Nftables.Metrics.Port != 40600 || doc.Nftables.Metrics.RelayAddress != "10.200.0.1" {
+		t.Errorf("nftables metrics = %+v, want {Port:40600 RelayAddress:10.200.0.1}", doc.Nftables.Metrics)
 	}
 	if len(doc.Nftables.Rules) != 2 {
 		t.Fatalf("nftables rules = %d, want 2", len(doc.Nftables.Rules))
@@ -917,7 +917,7 @@ func TestBuildPlan_ProtocolAwarePortConflict(t *testing.T) {
 		t.Errorf("expected UDP port conflict error, got: %v", err)
 	}
 
-	// 3. Reserved port 8080 is rejected for any protocol (TCP or UDP).
+	// 3. Reserved port 40500 is rejected for any protocol (TCP or UDP).
 	for _, proto := range []string{"TCP", "UDP"} {
 		bindingsReserved := []v1alpha1.PortBinding{
 			{
@@ -927,7 +927,7 @@ func TestBuildPlan_ProtocolAwarePortConflict(t *testing.T) {
 						{
 							Name:       "test-reserved",
 							Protocol:   proto,
-							ListenPort: 8080,
+							ListenPort: 40500,
 							Target: v1alpha1.BindingTarget{
 								Address: "10.0.0.1",
 								Port:    8080,
@@ -939,7 +939,7 @@ func TestBuildPlan_ProtocolAwarePortConflict(t *testing.T) {
 		}
 		_, err = BuildPlan(node, bindingsReserved, mockResolver{}, "priv", "pub", keys)
 		if err == nil {
-			t.Errorf("expected BuildPlan to fail for reserved port 8080 with protocol %s", proto)
+			t.Errorf("expected BuildPlan to fail for reserved port 40500 with protocol %s", proto)
 		} else if !strings.Contains(err.Error(), "reserved for the uplink readiness endpoint") {
 			t.Errorf("expected reserved port error mentioning uplink readiness endpoint, got: %v", err)
 		}

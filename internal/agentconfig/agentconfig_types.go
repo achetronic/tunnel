@@ -78,7 +78,7 @@ type NftablesConfig struct {
 // NftablesMetrics forwards inbound traffic on Port to RelayAddress:Port over the
 // tunnel, so in-cluster scrapers reach the relay's Envoy admin interface.
 type NftablesMetrics struct {
-	// Port is the port both listened on and forwarded to, e.g. 9901.
+	// Port is the port both listened on and forwarded to, e.g. 40600.
 	Port int `json:"port"`
 	// RelayAddress is the relay tunnel IP the traffic is DNAT'd to, e.g. 10.200.0.1.
 	RelayAddress string `json:"relayAddress"`

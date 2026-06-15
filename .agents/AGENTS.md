@@ -4,7 +4,7 @@ Tunnel is a Kubernetes operator that exposes arbitrary TCP/UDP ports on the publ
 of one or more Linux VPS instances and routes that traffic back into a private cluster.
 The data path is: `internet -> Envoy (VPS) -> N WireGuard tunnels -> uplink pods (DNAT) ->
 ClusterIP/IP`. The operator is **control plane only** and never sits in the data path.
-Envoy active-health-checks each uplink's `/ready` (`:8080`) and only balances onto replicas
+Envoy active-health-checks each uplink's `/ready` (`:40500`) and only balances onto replicas
 whose tunnel is up; tune it via the optional `spec.edge.healthCheck` on the EdgeNode.
 
 > Read the companion docs in this folder before touching the data path:
@@ -205,10 +205,10 @@ make install && make deploy IMG=<registry>/tunnel:tag   # CRDs + manager
 kubectl apply -k config/samples/
 ```
 The official debug path is the **admin bridge**: an nftables DNAT in the uplink pods
-forwards port `9901` through the tunnel to Envoy's admin (`10.200.0.1:9901`, never public):
+forwards port `40600` through the tunnel to Envoy's admin (`10.200.0.1:40600`, never public):
 ```bash
-kubectl -n tunnel exec -it <node>-uplink-0 -c uplink -- curl -s http://127.0.0.1:9901/config_dump
-kubectl -n tunnel exec -it <node>-uplink-0 -c uplink -- curl -s http://127.0.0.1:9901/stats/prometheus
+kubectl -n tunnel exec -it <node>-uplink-0 -c uplink -- curl -s http://127.0.0.1:40600/config_dump
+kubectl -n tunnel exec -it <node>-uplink-0 -c uplink -- curl -s http://127.0.0.1:40600/stats/prometheus
 ```
 We deliberately keep CR status minimal and rely on raw Envoy admin access instead of
 building rich status summaries.

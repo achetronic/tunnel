@@ -7,16 +7,16 @@ The VPS must be treated as a hostile and unknown environment. We do not depend o
 - **SSH host key verification:** The enrollment channel is the root of trust (it generates the VPS WireGuard key, pushes config and installs Envoy), so it must not be MITM-able. `sshexec` verifies the VPS host key against the `knownHosts` entry of the SSH Secret (OpenSSH `known_hosts` format). Verification is on by default: with no `knownHosts` entry the operator refuses to connect unless `ssh.insecureSkipHostKeyVerification` is explicitly set on the EdgeNode. The dial is bounded by `ssh.connectTimeout` (default `30s`) so a reconcile worker never blocks indefinitely on an unreachable host.
 
 ## 2. Observability & Debuggability (The Admin Bridge)
-Instead of exposing Envoy's admin port (9901) to the public Internet or complicating the VPS with extra software:
-- Envoy binds its administration panel strictly to the internal IP of the tunnel (`10.200.0.1:9901`).
-- The Kubernetes pods (Uplink) contain a `DNAT` rule in `nftables` that captures traffic destined for `9901` on the pod and redirects it through the tunnel to Envoy.
+Instead of exposing Envoy's admin port (40600) to the public Internet or complicating the VPS with extra software:
+- Envoy binds its administration panel strictly to the internal IP of the tunnel (`10.200.0.1:40600`).
+- The Kubernetes pods (Uplink) contain a `DNAT` rule in `nftables` that captures traffic destined for `40600` on the pod and redirects it through the tunnel to Envoy.
 - An `SNAT` (masquerade) is applied to that traffic so the VPS returns the response to the pod without needing static Kubernetes routes on the VPS.
-- **Design Decision:** This bridge is the official mechanism for both Prometheus metrics scraping and human debugging. Users can simply run `curl` against any uplink pod on port `9901` to access the full Envoy admin API (e.g., `/stats/prometheus`, `/config_dump`). We explicitly avoid building complex status summaries in the Custom Resource; raw, direct access to Envoy's API via this tunnel bridge is the intended architecture.
+- **Design Decision:** This bridge is the official mechanism for both Prometheus metrics scraping and human debugging. Users can simply run `curl` against any uplink pod on port `40600` to access the full Envoy admin API (e.g., `/stats/prometheus`, `/config_dump`). We explicitly avoid building complex status summaries in the Custom Resource; raw, direct access to Envoy's API via this tunnel bridge is the intended architecture.
 
 ## 3. File-Based Dynamic Configuration (xDS)
 - **Design Decision:** The operator manages the remote Envoy proxy via File-Based xDS (File System Subscriptions) to achieve zero-downtime reloads without the complexity of a gRPC Control Plane.
 - **Atomic Hot-Reload:** Envoy is bootstrapped once with an immutable `envoy.yaml` that watches `/etc/envoy/lds.yaml` and `/etc/envoy/cds.yaml`. The operator updates these files by writing a `.tmp` file and performing an atomic `mv`. Envoy detects the move via `inotify` and hot-reloads the configuration in RAM without dropping active L4 connections.
-- **Admin Bridge Debuggability:** Since the configuration lives dynamically, users must be able to debug it. The existing `nftables` bridge transparently proxies port `9901` from the uplink pods to the VPS Envoy admin interface. Users run `curl http://<uplink-pod>:9901/config_dump` to inspect the active configuration.
+- **Admin Bridge Debuggability:** Since the configuration lives dynamically, users must be able to debug it. The existing `nftables` bridge transparently proxies port `40600` from the uplink pods to the VPS Envoy admin interface. Users run `curl http://<uplink-pod>:40600/config_dump` to inspect the active configuration.
 
 ## 4. TLS at the Edge (passthrough / offload / mutual)
 A TCP PortBinding may terminate or route TLS at the VPS via an optional `tls: { mode, secretRef }` block. The design keeps the user surface minimal and idiomatic:

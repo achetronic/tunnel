@@ -41,7 +41,7 @@ admin:
   address:
     socket_address:
       address: 10.200.0.1
-      port_value: 9901
+      port_value: 40600
 
 dynamic_resources:
   lds_config:
@@ -415,7 +415,7 @@ admin:
   address:
     socket_address:
       address: 10.77.0.1
-      port_value: 9901
+      port_value: 40600
 
 dynamic_resources:
   lds_config:

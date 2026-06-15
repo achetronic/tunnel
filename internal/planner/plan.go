@@ -160,7 +160,7 @@ const uplinkInterface = "wg-uplink"
 // metricsPort is the port the relay's Envoy admin interface listens on and the
 // port the uplink forwards in-cluster scrape traffic to over the tunnel. It
 // matches the metrics DNAT applied natively by internal/nftables.
-const metricsPort = 9901
+const metricsPort = 40600
 
 // buildRelayDocument renders the tunnelctl desired-state document for the VPS
 // relay. tunnelctl applies it natively via netlink. The relay has no nftables
@@ -246,7 +246,7 @@ const defaultTunnelNetwork = "10.200.0.0/24"
 // uplinkReadinessPort is the port each uplink replica serves its readiness
 // endpoint on. Envoy health-checks /ready on this port. It must match the
 // readiness probe port the uplink container exposes in internal/uplink.
-const uplinkReadinessPort int32 = 8080
+const uplinkReadinessPort int32 = 40500
 
 // resolveEnvoyHealthCheck turns the EdgeNode health-check spec into the render
 // input, applying sane defaults for any field left unset. These defaults must
@@ -326,8 +326,8 @@ func buildRelayPeers(ipCalc *ipam.IPAM, uplinkKeys map[int32]string, replicas in
 }
 
 // reservedPorts are listen ports the data path claims for itself on the VPS:
-// the uplink readiness endpoint Envoy health-checks (8080) and the Envoy admin
-// interface / metrics DNAT (9901). A PortBinding on either would silently
+// the uplink readiness endpoint Envoy health-checks (40500) and the Envoy admin
+// interface / metrics DNAT (40600). A PortBinding on either would silently
 // shadow or break the infrastructure, so the planner rejects the collision
 // with a precise message.
 var reservedPorts = map[int32]string{

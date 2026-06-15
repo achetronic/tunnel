@@ -353,22 +353,22 @@ Honored by both binaries (manager and uplink):
 ## Observability 🔭
 
 The Envoy admin port is never exposed to the internet.
-Each uplink pod forwards its own `:9901` through the tunnel to Envoy's admin interface.
+Each uplink pod forwards its own `:40600` through the tunnel to Envoy's admin interface.
 That bridge is the intended way to scrape metrics and debug;
 there is deliberately no large status blob on the resources.
 
 ```bash
-# Every uplink pod exposes Envoy's admin on its own pod IP at :9901, so any pod
+# Every uplink pod exposes Envoy's admin on its own pod IP at :40600, so any pod
 # in the cluster can reach it directly, no exec into the uplink needed.
 kubectl -n tunnel get pods -l app.kubernetes.io/name=uplink -o wide
 
 # Prometheus metrics, straight against an uplink pod IP
 kubectl run tmp --rm -it --restart=Never --image=curlimages/curl -- \
-  curl -s http://<uplink-pod-ip>:9901/stats/prometheus
+  curl -s http://<uplink-pod-ip>:40600/stats/prometheus
 
 # Same path for ad-hoc debugging (config_dump, clusters, ...)
 kubectl run tmp --rm -it --restart=Never --image=curlimages/curl -- \
-  curl -s http://<uplink-pod-ip>:9901/config_dump
+  curl -s http://<uplink-pod-ip>:40600/config_dump
 ```
 
 Or let Prometheus scrape the uplink pods directly with a PodMonitor:
@@ -384,7 +384,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: uplink
   podMetricsEndpoints:
-    - targetPort: 9901
+    - targetPort: 40600
       path: /stats/prometheus
       scheme: http
 ```

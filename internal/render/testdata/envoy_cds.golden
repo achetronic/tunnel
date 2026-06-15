@@ -54,7 +54,7 @@ resources:
                     address: 10.200.0.2
                     port_value: 443
                 health_check_config:
-                  port_value: 8080
+                  port_value: 40500
               metadata:
                 filter_metadata:
                   envoy.transport_socket_match:
@@ -65,7 +65,7 @@ resources:
                     address: 10.200.0.3
                     port_value: 443
                 health_check_config:
-                  port_value: 8080
+                  port_value: 40500
               metadata:
                 filter_metadata:
                   envoy.transport_socket_match:
@@ -100,4 +100,4 @@ resources:
                     address: 10.200.0.2
                     port_value: 51820
                 health_check_config:
-                  port_value: 8080
+                  port_value: 40500
