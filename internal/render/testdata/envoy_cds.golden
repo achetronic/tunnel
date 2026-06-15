@@ -9,6 +9,10 @@ resources:
         interval: 5s
         unhealthy_threshold: 2
         healthy_threshold: 2
+        # A fresh connection per probe. The uplink readiness server closes idle
+        # keep-alive connections between probes, and reusing a half-closed one
+        # records a spurious network failure that ejects a healthy uplink.
+        reuse_connection: false
         http_health_check:
           path: /ready
         # Empty criteria selects the plain (raw_buffer) transport_socket_match, so
@@ -76,6 +80,10 @@ resources:
         interval: 5s
         unhealthy_threshold: 2
         healthy_threshold: 2
+        # A fresh connection per probe. The uplink readiness server closes idle
+        # keep-alive connections between probes, and reusing a half-closed one
+        # records a spurious network failure that ejects a healthy uplink.
+        reuse_connection: false
         http_health_check:
           path: /ready
     # healthy_panic_threshold 0: hard-coded so Envoy fails fast when most or all uplinks are down.

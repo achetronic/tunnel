@@ -140,6 +140,10 @@ const cdsTpl = `resources:
         interval: {{ .HealthCheck.Interval }}
         unhealthy_threshold: {{ .HealthCheck.UnhealthyThreshold }}
         healthy_threshold: {{ .HealthCheck.HealthyThreshold }}
+        # A fresh connection per probe. The uplink readiness server closes idle
+        # keep-alive connections between probes, and reusing a half-closed one
+        # records a spurious network failure that ejects a healthy uplink.
+        reuse_connection: false
         http_health_check:
           path: /ready
         {{- if and (eq .Protocol "TCP") .TCP.ProxyProtocol }}

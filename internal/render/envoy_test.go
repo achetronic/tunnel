@@ -128,6 +128,13 @@ func TestRenderEnvoyLDSAndCDS(t *testing.T) {
 		t.Fatal("expected no raw_buffer transport socket under health check for non-proxy cluster (FIX 2)")
 	}
 
+	// Health checks must not reuse the upstream connection: the uplink readiness
+	// server closes idle keep-alive connections between probes, so reusing one
+	// records a spurious network failure that ejects a healthy uplink.
+	if bytes.Count(cdsOut, []byte("reuse_connection: false")) != 2 {
+		t.Fatalf("expected reuse_connection: false under the health check of both clusters, got:\n%s", cdsOut)
+	}
+
 	cdsWant := goldenRead(t, "envoy_cds.golden", cdsOut)
 	if !bytes.Equal(cdsOut, cdsWant) {
 		t.Fatalf("CDS output mismatch:\ngot:\n%s\nwant:\n%s", cdsOut, cdsWant)
