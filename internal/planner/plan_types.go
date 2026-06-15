@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package planner computes the complete desired state (Plan) for a VPS relay
 // and its uplink replicas from a v1alpha1.EdgeNode and a set of PortBindings.
 // It is a pure computation package: no IO, no Kubernetes client calls.

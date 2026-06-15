@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package agentrun is the shared apply/run core used by both the tunnelctl
 // binary and the in-cluster uplink agent. It applies a desired-state document
 // (WireGuard always, nftables when present), and can run as a daemon that

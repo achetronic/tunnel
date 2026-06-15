@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Command tunnelctl applies and inspects a tunnel node's desired state from a
 // JSON document: WireGuard (always) and nftables (uplink only). It runs the same
 // core on both sides. The edge invokes "apply"/"status" once over SSH; "run" is

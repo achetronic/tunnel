@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package nftables programs the uplink DNAT and masquerade ruleset natively
 // through netlink (github.com/google/nftables), so the uplink needs no `nft`
 // binary. The kernel rule semantics are validated against a real uplink; the

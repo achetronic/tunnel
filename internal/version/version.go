@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package version exposes the operator's build version as a single source of
 // truth. The value is stamped at build time with the Go linker:
 //

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package logging builds the process-wide slog logger from environment
 // variables so every Tunnel binary shares one logging setup: readable text in
 // development and JSON for cluster aggregation. The manager bridges its

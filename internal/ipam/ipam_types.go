@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package ipam provides IP address management for tunnel overlay networks.
 // It assigns a fixed relay IP (.1) and per-replica IPs (.2 + ordinal) within
 // a given IPv4 CIDR, validating that all computed addresses actually fall

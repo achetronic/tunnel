@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package wg applies and inspects a WireGuard device natively through netlink
 // and wgctrl, so the host needs neither wireguard-tools nor wg-quick. The
 // translation logic is pure and unit-tested; the netlink and wgctrl calls are

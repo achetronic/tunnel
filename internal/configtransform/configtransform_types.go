@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package configtransform postprocesses a desired-state config document by
 // evaluating declarative CEL expressions against it. The transforms live in a
 // separate rules document (YAML or JSON), each one targeting a dot-separated

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package render provides deterministic template rendering for Envoy xDS
 // resources (LDS/CDS) installed on the VPS relay. All exported Render*
 // functions are pure: same inputs always produce the same bytes (templates are

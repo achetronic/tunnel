@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-License-Identifier: Apache-2.0
+
 // Package agentconfig defines the JSON "desired state" document consumed by
 // the tunnelctl agent on both the VPS edge node and the uplink pods.
 // It is the shared contract every other layer of the operator depends on.
