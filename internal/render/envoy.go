@@ -24,6 +24,9 @@ const ldsTpl = `resources:
         protocol: UDP
         {{- end }}
     {{- if eq .Protocol "UDP" }}
+    udp_listener_config:
+      downstream_socket_config:
+        prefer_gro: true
     listener_filters:
       - name: envoy.filters.udp_listener.udp_proxy
         typed_config:
