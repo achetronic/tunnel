@@ -41,3 +41,15 @@ A TCP PortBinding may terminate or route TLS at the VPS via an optional `tls: { 
 
 ## 6. Agents
 This `.agents/` folder contains the knowledge material the LLM must read to absorb context before altering the data path.
+
+## 7. Host-Level Tuning (Closed Decisions)
+
+- **Single knob for socket buffers:** `spec.host.kernelMaxSocketBufferBytes` provides a unified control for kernel `net.core.rmem_max`/`wmem_max` sysctls and Envoy UDP listener `SO_RCVBUF`/`SO_SNDBUF` socket options. This simplifies user configuration: one value effectively raises the socket buffer ceiling across both kernel and userspace for UDP, which does not autotune. TCP socket buffers autotune up to this ceiling, so no explicit Envoy TCP listener socket options are set.
+- **Dedicated NIC offload toggle:** `spec.host.disableNicOffloads` offers a precise switch for GRO/GSO on the underlay physical NIC carrying the WireGuard transport.
+    - **Auto-detection:** The underlay NIC is auto-detected via `netlink route get` to the VPS's public IP.
+    - **Natively applied:** Offloads are managed using `ethtool-netlink` by `tunnelctl` as a `netdev` section within the relay desired-state document. This method ensures changes persist across reboots via the boot oneshot.
+    - **Default off:** The default `false` (offloads enabled) is chosen because disabling GRO/GSO degrades throughput for general TCP/QUIC traffic. It is intended for specific encapsulated UDP or tunnel-in-tunnel workloads where GRO can corrupt datagram boundaries and break L4 datagram semantics.
+    - **No per-listener granularity:** The offload setting applies to the entire underlay NIC, not per Envoy listener, reflecting its kernel-level nature.
+    - **No generic escape-hatch:** This specific toggle for GRO/GSO addresses a known issue in certain high-performance tunnel scenarios; a generic `ethtool` escape-hatch is not provided to prevent arbitrary kernel network changes.
+- **Envoy `prefer_gro` absent, `enable_reuse_port:true` explicit:** GRO is delegated to the OS (and disabled at the NIC via `disableNicOffloads` when needed), so the operator-managed Envoy config carries no `prefer_gro`. Every listener sets `enable_reuse_port:true` (honored for both TCP and UDP on Linux; the `reuse_port` field is deprecated).
+- **Teardown does not restore live values:** Consistent with `ip_forward` and other host-level settings, teardown removes the persistence mechanisms (sysctl drop-in, `netdev` section from the boot oneshot) for `kernelMaxSocketBufferBytes` and `disableNicOffloads`. Live kernel values are not restored; the host reverts to its defaults on the next reboot.

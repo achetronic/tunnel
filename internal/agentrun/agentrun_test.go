@@ -28,6 +28,50 @@ func testDoc() *agentconfig.Document {
 	}
 }
 
+// TestApply_DispatchesSections verifies Apply dispatches each native applier:
+// WireGuard always, nftables and netdev only when their sections are present.
+// The appliers are swapped for fakes so no kernel IO happens; the originals are
+// restored after the test.
+func TestApply_DispatchesSections(t *testing.T) {
+	origWG, origNft, origNd := applyWireGuard, applyNftables, applyNetdev
+	t.Cleanup(func() {
+		applyWireGuard, applyNftables, applyNetdev = origWG, origNft, origNd
+	})
+
+	var wgCalls, nftCalls int
+	var netdevCalls []agentconfig.NetdevConfig
+	applyWireGuard = func(agentconfig.WireGuardConfig) error { wgCalls++; return nil }
+	applyNftables = func(agentconfig.NftablesConfig) error { nftCalls++; return nil }
+	applyNetdev = func(cfg agentconfig.NetdevConfig) error {
+		netdevCalls = append(netdevCalls, cfg)
+		return nil
+	}
+
+	// WireGuard only: no nftables, no netdev.
+	if err := Apply(testDoc()); err != nil {
+		t.Fatalf("apply (wg only) failed: %v", err)
+	}
+	if wgCalls != 1 || nftCalls != 0 || len(netdevCalls) != 0 {
+		t.Fatalf("wg-only dispatch wrong: wg=%d nft=%d netdev=%d", wgCalls, nftCalls, len(netdevCalls))
+	}
+
+	// With a netdev section present, netdev.Apply must be dispatched with it.
+	doc := testDoc()
+	doc.Netdev = &agentconfig.NetdevConfig{DisableOffloads: true}
+	if err := Apply(doc); err != nil {
+		t.Fatalf("apply (with netdev) failed: %v", err)
+	}
+	if len(netdevCalls) != 1 || !netdevCalls[0].DisableOffloads {
+		t.Fatalf("netdev section not dispatched as expected: %+v", netdevCalls)
+	}
+
+	// A netdev applier error must propagate.
+	applyNetdev = func(agentconfig.NetdevConfig) error { return errors.New("boom") }
+	if err := Apply(doc); err == nil {
+		t.Fatal("expected netdev apply error to propagate")
+	}
+}
+
 // The retry loop must keep attempting with exponentially increasing sleeps
 // until an apply succeeds, then stop.
 func TestRetryInitialApply_RetriesUntilSuccess(t *testing.T) {

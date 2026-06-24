@@ -83,12 +83,22 @@ func BuildPlan(
 		keepalive = 25
 	}
 
+	// Host tuning: default the socket-buffer ceiling and read the NIC offload
+	// toggle. The buffer is threaded into the Envoy UDP socket_options and the
+	// sysctl drop-in (via the Plan); the offload toggle becomes a netdev section
+	// in the relay document only when requested.
+	bufferBytes := node.Spec.Host.KernelMaxSocketBufferBytes
+	if bufferBytes <= 0 {
+		bufferBytes = defaultKernelMaxSocketBufferBytes
+	}
+	disableOffloads := node.Spec.Host.DisableNicOffloads
+
 	wgPeers, err := buildRelayPeers(ipCalc, uplinkKeys, replicas)
 	if err != nil {
 		return nil, err
 	}
 
-	relayDocument, err := buildRelayDocument(vpsPrivKey, fmt.Sprintf("%s/%d", relayIP, mask), listenPort, mtu, wgPeers)
+	relayDocument, err := buildRelayDocument(vpsPrivKey, fmt.Sprintf("%s/%d", relayIP, mask), listenPort, mtu, wgPeers, disableOffloads)
 	if err != nil {
 		return nil, fmt.Errorf("render relay document: %w", err)
 	}
@@ -110,14 +120,16 @@ func BuildPlan(
 	}
 
 	envoyLDS, err := render.RenderEnvoyLDS(render.EnvoyConfig{
-		Listeners: envoyListeners,
+		Listeners:            envoyListeners,
+		UDPSocketBufferBytes: bufferBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("render envoy LDS: %w", err)
 	}
 
 	envoyCDS, err := render.RenderEnvoyCDS(render.EnvoyConfig{
-		Listeners: envoyListeners,
+		Listeners:            envoyListeners,
+		UDPSocketBufferBytes: bufferBytes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("render envoy CDS: %w", err)
@@ -140,19 +152,25 @@ func BuildPlan(
 	planHash := hashBytes([]byte(relayDocHash + uplinkDocHash + ldsHash + cdsHash))
 
 	return &Plan{
-		EnvoyLDS:           envoyLDS,
-		EnvoyCDS:           envoyCDS,
-		EnvoyLDSHash:       ldsHash,
-		EnvoyCDSHash:       cdsHash,
-		RelayDocument:      relayDocument,
-		RelayDocumentHash:  relayDocHash,
-		UplinkDocument:     uplinkDocument,
-		UplinkDocumentHash: uplinkDocHash,
-		PlanHash:           planHash,
-		RelayIP:            relayIP,
-		TLSMaterials:       tlsMaterials,
+		EnvoyLDS:                   envoyLDS,
+		EnvoyCDS:                   envoyCDS,
+		EnvoyLDSHash:               ldsHash,
+		EnvoyCDSHash:               cdsHash,
+		RelayDocument:              relayDocument,
+		RelayDocumentHash:          relayDocHash,
+		UplinkDocument:             uplinkDocument,
+		UplinkDocumentHash:         uplinkDocHash,
+		PlanHash:                   planHash,
+		RelayIP:                    relayIP,
+		TLSMaterials:               tlsMaterials,
+		KernelMaxSocketBufferBytes: bufferBytes,
 	}, nil
 }
+
+// defaultKernelMaxSocketBufferBytes is the socket-buffer ceiling used when the
+// EdgeNode leaves spec.host.kernelMaxSocketBufferBytes unset or non-positive. It
+// matches the kubebuilder default on v1alpha1.HostSpec (25MB).
+const defaultKernelMaxSocketBufferBytes int64 = 26214400
 
 // relayInterface is the WireGuard interface name on the VPS relay.
 const relayInterface = "wg-relay"
@@ -168,8 +186,10 @@ const metricsPort = 40600
 // buildRelayDocument renders the tunnelctl desired-state document for the VPS
 // relay. tunnelctl applies it natively via netlink. The relay has no nftables
 // section; its peers are the uplink replicas, reached only when they dial in, so
-// they carry no endpoint or keepalive.
-func buildRelayDocument(privateKey, interfaceIP string, listenPort, mtu int32, peers []agentconfig.WireGuardPeer) ([]byte, error) {
+// they carry no endpoint or keepalive. When disableOffloads is true the document
+// carries a netdev section that turns the underlay NIC's GRO/GSO off; otherwise
+// the section is left nil so the NIC is untouched.
+func buildRelayDocument(privateKey, interfaceIP string, listenPort, mtu int32, peers []agentconfig.WireGuardPeer, disableOffloads bool) ([]byte, error) {
 	doc := agentconfig.Document{
 		Version: agentconfig.CurrentVersion,
 		WireGuard: agentconfig.WireGuardConfig{
@@ -182,6 +202,9 @@ func buildRelayDocument(privateKey, interfaceIP string, listenPort, mtu int32, p
 			},
 			Peers: peers,
 		},
+	}
+	if disableOffloads {
+		doc.Netdev = &agentconfig.NetdevConfig{DisableOffloads: true}
 	}
 	if err := doc.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid relay document: %w", err)

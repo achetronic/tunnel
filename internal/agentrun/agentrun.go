@@ -25,6 +25,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/achetronic/tunnel/internal/agentconfig"
+	"github.com/achetronic/tunnel/internal/netdev"
 	"github.com/achetronic/tunnel/internal/nftables"
 	"github.com/achetronic/tunnel/internal/wg"
 )
@@ -49,19 +50,38 @@ const (
 // consistent across all three paths.
 type Loader func() (*agentconfig.Document, error)
 
-// Apply applies the WireGuard config and, when present, the nftables config of
-// doc. It is idempotent: re-running with the same document is a no-op.
+// Apply applies the WireGuard config and, when present, the nftables and netdev
+// configs of doc. It is idempotent: re-running with the same document is a no-op.
+// The three appliers are package variables so tests can substitute fakes; the
+// defaults are the real native appliers.
 func Apply(doc *agentconfig.Document) error {
-	if err := wg.Apply(doc.WireGuard); err != nil {
+	if err := applyWireGuard(doc.WireGuard); err != nil {
 		return err
 	}
 	if doc.Nftables != nil {
-		if err := nftables.Apply(*doc.Nftables); err != nil {
+		if err := applyNftables(*doc.Nftables); err != nil {
+			return err
+		}
+	}
+	// netdev tunes the host underlay NIC. A nil section is left untouched; a
+	// present section is applied wherever the document carries it, regardless of
+	// node role (the relay carries it when the EdgeNode requests it).
+	if doc.Netdev != nil {
+		if err := applyNetdev(*doc.Netdev); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
+// applyWireGuard, applyNftables and applyNetdev are the native appliers Apply
+// dispatches to. They are package variables so tests can replace them without
+// touching the kernel; production uses the real implementations.
+var (
+	applyWireGuard = wg.Apply
+	applyNftables  = nftables.Apply
+	applyNetdev    = netdev.Apply
+)
 
 // Readiness decides whether a node is ready from its observed WireGuard state:
 // the interface must exist, be up, and have at least one peer with a handshake

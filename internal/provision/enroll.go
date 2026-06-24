@@ -111,7 +111,7 @@ func Enroll(ctx context.Context, exec sshexec.Executor, plan *planner.Plan, tlsF
 	if err := writeEnvoyService(ctx, exec); err != nil {
 		return false, err
 	}
-	if err := enableIPForwarding(ctx, exec); err != nil {
+	if err := writeHostSysctls(ctx, exec, plan.KernelMaxSocketBufferBytes); err != nil {
 		return false, err
 	}
 	if err := applyRelayDocument(ctx, exec, plan, state); err != nil {
@@ -261,16 +261,19 @@ func installEnvoyBinary(ctx context.Context, exec sshexec.Executor, version stri
 }
 
 // writeEnvoyService installs the Envoy systemd unit and a boot-time oneshot
-// that reapplies the WireGuard relay, then reloads systemd and enables both so
-// they come back after a VPS reboot. The wg-relay interface is created natively
-// by tunnelctl and is not kernel-persistent, so without a boot unit a reboot
-// leaves Envoy unable to bind its admin to the tunnel IP and unable to reach the
-// uplinks until the next operator reconcile. The wg-relay oneshot runs the same
-// tunnelctl already on the host (no resident daemon), and the Envoy unit depends
-// on it so WireGuard is up before Envoy starts.
+// (tunnel-boot.service) that reapplies the whole node desired-state document,
+// then reloads systemd and enables both so they come back after a VPS reboot.
+// The wg-relay interface is created natively by tunnelctl and is not
+// kernel-persistent, so without a boot unit a reboot leaves Envoy unable to bind
+// its admin to the tunnel IP and unable to reach the uplinks until the next
+// operator reconcile. The tunnel-boot oneshot runs the same tunnelctl already on
+// the host (no resident daemon), reapplying the relay document (WireGuard plus
+// any netdev tuning), and the Envoy unit depends on it so the relay is up before
+// Envoy starts. The systemd unit is named tunnel-boot.service; the WireGuard
+// interface it brings up is still wg-relay.
 func writeEnvoyService(ctx context.Context, exec sshexec.Executor) error {
-	wgRelayService := `[Unit]
-Description=Tunnel WireGuard relay
+	bootService := `[Unit]
+Description=Tunnel node boot reconcile
 After=network.target
 
 [Service]
@@ -283,8 +286,8 @@ WantedBy=multi-user.target
 `
 	envoyService := `[Unit]
 Description=Envoy Proxy
-After=network.target wg-relay.service
-Requires=wg-relay.service
+After=network.target tunnel-boot.service
+Requires=tunnel-boot.service
 
 [Service]
 ExecStart=` + envoyBinPath + ` -c /etc/envoy/envoy.yaml
@@ -298,8 +301,8 @@ WantedBy=multi-user.target
 	if _, err := exec.Run(ctx, "mkdir -p /etc/envoy"); err != nil {
 		return fmt.Errorf("failed to create envoy dir: %w", err)
 	}
-	if err := exec.Put(ctx, "/etc/systemd/system/wg-relay.service", []byte(wgRelayService)); err != nil {
-		return fmt.Errorf("failed to write wg-relay.service: %w", err)
+	if err := exec.Put(ctx, "/etc/systemd/system/tunnel-boot.service", []byte(bootService)); err != nil {
+		return fmt.Errorf("failed to write tunnel-boot.service: %w", err)
 	}
 	if err := exec.Put(ctx, "/etc/systemd/system/envoy.service", []byte(envoyService)); err != nil {
 		return fmt.Errorf("failed to write envoy.service: %w", err)
@@ -307,20 +310,51 @@ WantedBy=multi-user.target
 	if _, err := exec.Run(ctx, "systemctl daemon-reload"); err != nil {
 		return fmt.Errorf("failed to reload systemd: %w", err)
 	}
-	// Enable wg-relay so the relay is reapplied on boot. Envoy is enabled
-	// alongside its start in ensureEnvoyRunning; enabling wg-relay here keeps
+	// Enable tunnel-boot so the relay is reapplied on boot. Envoy is enabled
+	// alongside its start in ensureEnvoyRunning; enabling tunnel-boot here keeps
 	// the boot-survival contract in one place.
-	if _, err := exec.Run(ctx, "systemctl enable wg-relay.service"); err != nil {
-		return fmt.Errorf("failed to enable wg-relay.service: %w", err)
+	if _, err := exec.Run(ctx, "systemctl enable tunnel-boot.service"); err != nil {
+		return fmt.Errorf("failed to enable tunnel-boot.service: %w", err)
 	}
 	return nil
 }
 
-// enableIPForwarding turns on IPv4 forwarding so the relay can route traffic
-// between peers, persisting it through a sysctl drop-in.
-func enableIPForwarding(ctx context.Context, exec sshexec.Executor) error {
-	if _, err := exec.Run(ctx, "sysctl -w net.ipv4.ip_forward=1 && echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-tunnel.conf"); err != nil {
-		return fmt.Errorf("failed to set sysctl: %w", err)
+// sysctlDropInPath is the persisted sysctl drop-in the operator owns on the VPS.
+const sysctlDropInPath = "/etc/sysctl.d/99-tunnel.conf"
+
+// defaultKernelMaxSocketBufferBytes is the socket-buffer ceiling used when the
+// plan carries a non-positive value, mirroring the planner/CRD default (25MB).
+// It keeps the sysctl drop-in valid even if a caller builds a Plan directly.
+const defaultKernelMaxSocketBufferBytes int64 = 26214400
+
+// writeHostSysctls installs the operator's sysctl drop-in on the VPS in a single
+// overwrite (never an append, so re-applying never duplicates lines) and applies
+// it with "sysctl -p". It enables IPv4 forwarding so the relay routes between
+// WireGuard peers, and raises the kernel socket-buffer ceiling
+// (net.core.rmem_max/wmem_max) to the configured value so high-throughput UDP
+// listeners can use larger SO_RCVBUF/SO_SNDBUF (UDP does not autotune).
+func writeHostSysctls(ctx context.Context, exec sshexec.Executor, bufferBytes int64) error {
+	if bufferBytes <= 0 {
+		bufferBytes = defaultKernelMaxSocketBufferBytes
+	}
+	// Managed drop-in: a single overwrite keeps it idempotent across reconciles.
+	// Docs: kernel ip-sysctl (ip_forward) and admin-guide/sysctl/net (core buffers).
+	content := fmt.Sprintf(`# Managed by Tunnel. Do not edit; this file is overwritten on every reconcile.
+# IPv4 forwarding lets the relay route traffic between WireGuard peers.
+# https://www.kernel.org/doc/Documentation/networking/ip-sysctl.txt
+net.ipv4.ip_forward=1
+# Socket-buffer ceiling for high-throughput UDP listeners. UDP does not autotune,
+# so Envoy sets SO_RCVBUF/SO_SNDBUF up to this maximum; TCP autotunes below it.
+# https://www.kernel.org/doc/Documentation/admin-guide/sysctl/net.rst
+net.core.rmem_max=%d
+net.core.wmem_max=%d
+`, bufferBytes, bufferBytes)
+
+	if err := exec.Put(ctx, sysctlDropInPath, []byte(content)); err != nil {
+		return fmt.Errorf("failed to write sysctl drop-in: %w", err)
+	}
+	if _, err := exec.Run(ctx, "sysctl -p "+sysctlDropInPath); err != nil {
+		return fmt.Errorf("failed to apply sysctl drop-in: %w", err)
 	}
 	return nil
 }

@@ -113,6 +113,14 @@ type Plan struct {
 	// SSH. Like EnvoyVersion it is an install-time input set by the controller
 	// from the manager's --tunnelctl-dir flag, so it does not feed any of the hashes.
 	TunnelctlDir string
+
+	// KernelMaxSocketBufferBytes is the host socket-buffer ceiling (defaulted by
+	// the planner). The provision layer writes it into the sysctl drop-in
+	// (net.core.rmem_max/wmem_max) on the VPS. It is already reflected in the
+	// rendered Envoy LDS (UDP socket_options) and, when the EdgeNode requests it,
+	// in the relay document's netdev section, so it feeds the hashes through those
+	// artifacts and is not folded into PlanHash separately.
+	KernelMaxSocketBufferBytes int64
 }
 
 // hashBytes returns the hex-encoded SHA-256 digest of b.

@@ -117,4 +117,12 @@ type EnvoyListener struct {
 type EnvoyConfig struct {
 	// Listeners is the complete list of port bindings to render.
 	Listeners []EnvoyListener
+
+	// UDPSocketBufferBytes is the SO_RCVBUF/SO_SNDBUF value applied to every UDP
+	// listener via socket_options. UDP sockets do not autotune, so this raises
+	// their buffers up to the kernel ceiling (the planner threads the configured
+	// host buffer here). When zero, no socket_options block is rendered and the
+	// OS defaults apply. TCP listeners never receive socket_options (TCP
+	// autotunes), so this value only affects UDP.
+	UDPSocketBufferBytes int64
 }

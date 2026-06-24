@@ -116,7 +116,10 @@ func cmdApply(args []string) error {
 	if err := agentrun.Apply(doc); err != nil {
 		return err
 	}
-	slog.Info("applied desired state", "interface", doc.WireGuard.Interface.Name, "nftables", doc.Nftables != nil)
+	slog.Info("applied desired state",
+		"interface", doc.WireGuard.Interface.Name,
+		"nftables", doc.Nftables != nil,
+		"netdev", doc.Netdev != nil)
 	return nil
 }
 

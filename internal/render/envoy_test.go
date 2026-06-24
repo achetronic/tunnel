@@ -144,6 +144,85 @@ func TestRenderEnvoyLDSAndCDS(t *testing.T) {
 	}
 }
 
+// TestRenderEnvoyLDS_UDPSocketBuffer verifies that a non-zero UDPSocketBufferBytes
+// renders SO_RCVBUF/SO_SNDBUF socket_options on UDP listeners only, that TCP
+// listeners never get socket_options (TCP autotunes), that every listener carries
+// enable_reuse_port, and that prefer_gro is gone (delegated to the OS). A zero
+// buffer renders no socket_options at all.
+func TestRenderEnvoyLDS_UDPSocketBuffer(t *testing.T) {
+	cfg := EnvoyConfig{
+		UDPSocketBufferBytes: 26214400,
+		Listeners: []EnvoyListener{
+			{
+				Name:       "udp_bind",
+				Protocol:   "UDP",
+				ListenPort: 51820,
+				Upstreams:  []EnvoyUpstreamServer{{"10.200.0.2", 51820}},
+				UDP:        EnvoyUDPParams{SessionTimeout: "60s"},
+			},
+			{
+				Name:       "tcp_bind",
+				Protocol:   "TCP",
+				ListenPort: 443,
+				Upstreams:  []EnvoyUpstreamServer{{"10.200.0.2", 443}},
+				TCP:        EnvoyTCPParams{ConnectTimeout: "5s", IdleTimeout: "3600s"},
+			},
+		},
+	}
+
+	out, err := RenderEnvoyLDS(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out2, err := RenderEnvoyLDS(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, out2) {
+		t.Fatal("RenderEnvoyLDS with socket buffer is not deterministic")
+	}
+
+	if bytes.Contains(out, []byte("prefer_gro")) {
+		t.Fatal("prefer_gro must be removed from the UDP listener (delegated to the OS)")
+	}
+	if n := bytes.Count(out, []byte("enable_reuse_port: true")); n != 2 {
+		t.Fatalf("expected enable_reuse_port on every listener (2), got %d", n)
+	}
+	if bytes.Count(out, []byte("socket_options")) != 1 {
+		t.Fatalf("expected exactly one socket_options block (UDP only), got:\n%s", out)
+	}
+	for _, want := range []string{"name: 8", "name: 7", "int_value: 26214400", "state: STATE_PREBIND"} {
+		if !bytes.Contains(out, []byte(want)) {
+			t.Fatalf("UDP socket_options missing %q;\n%s", want, out)
+		}
+	}
+
+	// The TCP listener block must not carry socket_options. TCP (443) sorts
+	// before UDP (51820), so bound the TCP block at the next listener.
+	tcpIdx := bytes.Index(out, []byte("listener_tcp_bind"))
+	udpIdx := bytes.Index(out, []byte("listener_udp_bind"))
+	if tcpIdx == -1 || udpIdx == -1 {
+		t.Fatal("missing a listener in output")
+	}
+	if tcpIdx > udpIdx {
+		t.Fatalf("expected TCP listener before UDP listener in sorted output")
+	}
+	if bytes.Contains(out[tcpIdx:udpIdx], []byte("socket_options")) {
+		t.Fatal("TCP listener must not receive socket_options (TCP autotunes)")
+	}
+
+	// A zero buffer renders no socket_options anywhere.
+	cfg.UDPSocketBufferBytes = 0
+	zeroOut, err := RenderEnvoyLDS(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(zeroOut, []byte("socket_options")) {
+		t.Fatal("no socket_options should render when the buffer is zero")
+	}
+}
+
 // TestRenderEnvoySDS verifies the SDS document embeds the cert/key inline for
 // offload, adds a CA validation resource for mutual, is deterministic, and
 // rejects incomplete input.

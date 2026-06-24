@@ -71,6 +71,9 @@ func (d *Document) Validate() error {
 	if err := validateNftables(d.Nftables); err != nil {
 		return err
 	}
+	if err := validateNetdev(d.Netdev); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -149,6 +152,15 @@ func validateNftables(nft *NftablesConfig) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// validateNetdev checks the netdev section. Both a nil section (the NIC is left
+// untouched) and a present section are valid: the section carries only a boolean
+// toggle, so there is nothing to constrain. It exists to keep the validation
+// surface uniform and ready for future fields.
+func validateNetdev(nd *NetdevConfig) error {
+	_ = nd
 	return nil
 }
 

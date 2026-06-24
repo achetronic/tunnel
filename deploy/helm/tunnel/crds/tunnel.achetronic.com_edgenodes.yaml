@@ -102,6 +102,33 @@ spec:
                         type: integer
                     type: object
                 type: object
+              host:
+                description: |-
+                  Host tunes the VPS as a machine (kernel and NIC), independent of the proxy.
+                  Optional; sane defaults apply. Placed between SSH and Edge by convention:
+                  host-level OS tuning sits below the proxy configuration.
+                properties:
+                  disableNicOffloads:
+                    default: false
+                    description: |-
+                      DisableNicOffloads turns GRO/GSO off on the underlay NIC carrying the
+                      WireGuard transport. It defaults false (offloads enabled) because disabling
+                      them degrades throughput for ordinary TCP/QUIC traffic; enable it only for
+                      encapsulated/non-uniform UDP payloads where GRO coalescing can corrupt
+                      datagram boundaries.
+                    type: boolean
+                  kernelMaxSocketBufferBytes:
+                    default: 26214400
+                    description: |-
+                      KernelMaxSocketBufferBytes is the socket-buffer ceiling. It is threaded to
+                      both the kernel sysctls (net.core.rmem_max/wmem_max) and the
+                      SO_RCVBUF/SO_SNDBUF of Envoy's UDP listeners. UDP does not autotune, so
+                      this single knob raises the effective buffer for high-throughput UDP while
+                      TCP autotunes up to the same ceiling. Defaults to 26214400 (25MB).
+                    format: int64
+                    minimum: 0
+                    type: integer
+                type: object
               ssh:
                 description: SSH holds the connection details used to enroll and manage
                   the VPS.
