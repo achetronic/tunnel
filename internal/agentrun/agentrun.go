@@ -63,9 +63,6 @@ func Apply(doc *agentconfig.Document) error {
 			return err
 		}
 	}
-	// netdev tunes the host underlay NIC. A nil section is left untouched; a
-	// present section is applied wherever the document carries it, regardless of
-	// node role (the relay carries it when the EdgeNode requests it).
 	if doc.Netdev != nil {
 		if err := applyNetdev(*doc.Netdev); err != nil {
 			return err
