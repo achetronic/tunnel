@@ -21,22 +21,19 @@ type Document struct {
 	WireGuard WireGuardConfig `json:"wireguard"`
 	// Nftables is the optional DNAT ruleset; set only on uplink nodes.
 	Nftables *NftablesConfig `json:"nftables,omitempty"`
-	// Netdev is the optional host NIC tuning section. A nil section is a no-op
-	// (the NIC is left untouched); when present it is applied wherever the
-	// document carries it, independent of the node role.
+	// Netdev is the optional host NIC tuning section. A nil section leaves the
+	// NIC untouched.
 	Netdev *NetdevConfig `json:"netdev,omitempty"`
 }
 
-// NetdevConfig tunes the underlay network interface of the host. tunnelctl
-// resolves the underlay interface itself at apply time (the device of the
-// default route to a public IP), so this section carries only the desired
-// behavior and never an interface name. A nil section means leave the NIC
-// untouched; presence with DisableOffloads true turns the offloads off.
+// NetdevConfig tunes the underlay network interface of the host. It carries the
+// desired behavior only, never an interface name: the underlay device is
+// resolved at apply time.
 type NetdevConfig struct {
-	// DisableOffloads turns GRO and GSO off on the resolved underlay NIC. It is
-	// intended for encapsulated/non-uniform UDP payloads where GRO coalescing
-	// can corrupt datagram boundaries; it defaults off because disabling it
-	// degrades throughput for ordinary TCP/QUIC traffic.
+	// DisableOffloads turns GRO and GSO off on the underlay NIC. It is for
+	// encapsulated, non-uniform UDP payloads where receive coalescing corrupts
+	// datagram boundaries; off by default because it degrades throughput for
+	// ordinary TCP/QUIC traffic.
 	DisableOffloads bool `json:"disableOffloads"`
 }
 
