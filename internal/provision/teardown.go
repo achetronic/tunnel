@@ -12,7 +12,7 @@ import (
 
 // Teardown cleans up the VPS when the EdgeNode is deleted. It reverses what
 // Enroll provisions: it removes the WireGuard relay interface and Envoy
-// service plus their configuration, the systemd unit, the sysctl drop-in, the
+// service plus their configuration, the systemd units, the sysctl drop-in, the
 // tunnelctl binary and the operator state directory.
 //
 // Service-stop commands are made idempotent with a trailing "|| true" so that
@@ -28,18 +28,19 @@ func Teardown(ctx context.Context, exec sshexec.Executor) error {
 		return fmt.Errorf("failed to remove tunnelctl binary: %w", err)
 	}
 
-	// Envoy service and configuration (envoy.yaml, lds.yaml, cds.yaml) and wg-relay service
+	// Envoy service and configuration (envoy.yaml, lds.yaml, cds.yaml) and the
+	// tunnel-boot oneshot.
 	if _, err := exec.Run(ctx, "systemctl disable --now envoy || true"); err != nil {
 		return fmt.Errorf("failed to stop envoy: %w", err)
 	}
-	if _, err := exec.Run(ctx, "systemctl disable --now wg-relay.service || true"); err != nil {
-		return fmt.Errorf("failed to stop wg-relay.service: %w", err)
+	if _, err := exec.Run(ctx, "systemctl disable --now tunnel-boot.service || true"); err != nil {
+		return fmt.Errorf("failed to stop tunnel-boot.service: %w", err)
 	}
 	if _, err := exec.Run(ctx, "rm -f /etc/systemd/system/envoy.service"); err != nil {
 		return fmt.Errorf("failed to remove envoy.service: %w", err)
 	}
-	if _, err := exec.Run(ctx, "rm -f /etc/systemd/system/wg-relay.service"); err != nil {
-		return fmt.Errorf("failed to remove wg-relay.service: %w", err)
+	if _, err := exec.Run(ctx, "rm -f /etc/systemd/system/tunnel-boot.service"); err != nil {
+		return fmt.Errorf("failed to remove tunnel-boot.service: %w", err)
 	}
 	if _, err := exec.Run(ctx, "systemctl daemon-reload || true"); err != nil {
 		return fmt.Errorf("failed to reload systemd: %w", err)

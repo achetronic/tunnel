@@ -585,3 +585,74 @@ func TestValidateNilDocument(t *testing.T) {
 		t.Fatal("Validate on nil document should return an error")
 	}
 }
+
+// netdevRelayJSON returns a valid relay document carrying a netdev section with
+// the given DisableOffloads value, so the netdev field is exercised end to end.
+func netdevRelayJSON(disable bool) string {
+	return `{
+  "version": 1,
+  "wireguard": {
+    "interface": {
+      "name": "wg-relay",
+      "privateKey": "aGVsbG9oZWxsb2hlbGxvaGVsbG9oZWxsb2hlbGxv",
+      "listenPort": 51821,
+      "address": "10.200.0.1/24"
+    },
+    "peers": []
+  },
+  "netdev": {
+    "disableOffloads": ` + map[bool]string{true: "true", false: "false"}[disable] + `
+  }
+}`
+}
+
+// TestNetdevSection covers the optional netdev section in all three shapes:
+// present with DisableOffloads true, present with false, and absent (nil), plus
+// a marshal/parse round-trip that must preserve the section field-for-field.
+func TestNetdevSection(t *testing.T) {
+	// Present, true.
+	docTrue, err := Parse([]byte(netdevRelayJSON(true)))
+	if err != nil {
+		t.Fatalf("parse netdev (true) failed: %v", err)
+	}
+	if docTrue.Netdev == nil {
+		t.Fatal("netdev section should be present")
+	}
+	if !docTrue.Netdev.DisableOffloads {
+		t.Fatal("netdev.disableOffloads should be true")
+	}
+
+	// Present, false.
+	docFalse, err := Parse([]byte(netdevRelayJSON(false)))
+	if err != nil {
+		t.Fatalf("parse netdev (false) failed: %v", err)
+	}
+	if docFalse.Netdev == nil {
+		t.Fatal("netdev section should be present even when disableOffloads is false")
+	}
+	if docFalse.Netdev.DisableOffloads {
+		t.Fatal("netdev.disableOffloads should be false")
+	}
+
+	// Absent (nil).
+	docAbsent, err := Parse([]byte(validRelayJSON))
+	if err != nil {
+		t.Fatalf("parse relay without netdev failed: %v", err)
+	}
+	if docAbsent.Netdev != nil {
+		t.Fatal("netdev section should be nil when omitted")
+	}
+
+	// Round-trip: Parse -> Marshal -> Parse must preserve the section.
+	marshaled, err := docTrue.Marshal()
+	if err != nil {
+		t.Fatalf("marshal netdev document failed: %v", err)
+	}
+	round, err := Parse(marshaled)
+	if err != nil {
+		t.Fatalf("re-parse of marshaled netdev document failed: %v", err)
+	}
+	if !reflect.DeepEqual(docTrue, round) {
+		t.Errorf("netdev round-trip mismatch\nwant: %+v\ngot:  %+v", docTrue, round)
+	}
+}

@@ -590,6 +590,109 @@ func TestBuildPlan_RelayDocument(t *testing.T) {
 			t.Errorf("relay peer[%d] keepalive = %d, want 0", i, p.PersistentKeepalive)
 		}
 	}
+	// With host tuning unset, the relay document carries no netdev section.
+	if doc.Netdev != nil {
+		t.Error("relay document must not carry a netdev section when offloads are not disabled")
+	}
+}
+
+// TestBuildPlan_HostTuning verifies the host-level performance tuning is threaded
+// through the plan: the socket-buffer ceiling defaults when unset and reaches the
+// Plan and the Envoy UDP socket_options, and the relay document carries a netdev
+// section only when the EdgeNode requests disabling NIC offloads.
+func TestBuildPlan_HostTuning(t *testing.T) {
+	keys := map[int32]string{0: "pub0", 1: "pub1"}
+	udpBinding := []v1alpha1.PortBinding{
+		{
+			Spec: v1alpha1.PortBindingSpec{
+				Bindings: []v1alpha1.PortBindingDefinition{
+					{
+						Name:       "dns",
+						Protocol:   "UDP",
+						ListenPort: 53,
+						Target:     v1alpha1.BindingTarget{Address: "10.96.1.2", Port: 53},
+					},
+				},
+			},
+		},
+	}
+
+	t.Run("defaults when host unset", func(t *testing.T) {
+		node := makeNode()
+		node.Spec.Address = testVPSAddress
+		plan, err := BuildPlan(node, udpBinding, mockResolver{}, "priv", "pub", keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.KernelMaxSocketBufferBytes != defaultKernelMaxSocketBufferBytes {
+			t.Errorf("buffer = %d, want default %d", plan.KernelMaxSocketBufferBytes, defaultKernelMaxSocketBufferBytes)
+		}
+		// The default buffer is non-zero, so UDP listeners get socket_options.
+		if !strings.Contains(string(plan.EnvoyLDS), "socket_options") {
+			t.Errorf("LDS should contain UDP socket_options with the default buffer;\n%s", plan.EnvoyLDS)
+		}
+		if !strings.Contains(string(plan.EnvoyLDS), "int_value: 26214400") {
+			t.Errorf("LDS should thread the default buffer into socket_options;\n%s", plan.EnvoyLDS)
+		}
+		doc, err := agentconfig.Parse(plan.RelayDocument)
+		if err != nil {
+			t.Fatalf("relay document does not validate: %v", err)
+		}
+		if doc.Netdev != nil {
+			t.Error("netdev section must be absent when DisableNicOffloads is false")
+		}
+	})
+
+	t.Run("custom buffer is threaded", func(t *testing.T) {
+		node := makeNode()
+		node.Spec.Address = testVPSAddress
+		node.Spec.Host.KernelMaxSocketBufferBytes = 8388608
+		plan, err := BuildPlan(node, udpBinding, mockResolver{}, "priv", "pub", keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if plan.KernelMaxSocketBufferBytes != 8388608 {
+			t.Errorf("buffer = %d, want 8388608", plan.KernelMaxSocketBufferBytes)
+		}
+		if !strings.Contains(string(plan.EnvoyLDS), "int_value: 8388608") {
+			t.Errorf("LDS should thread the custom buffer into socket_options;\n%s", plan.EnvoyLDS)
+		}
+	})
+
+	t.Run("netdev section present when offloads disabled", func(t *testing.T) {
+		node := makeNode()
+		node.Spec.Address = testVPSAddress
+		node.Spec.Host.DisableNicOffloads = true
+		plan, err := BuildPlan(node, udpBinding, mockResolver{}, "priv", "pub", keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := agentconfig.Parse(plan.RelayDocument)
+		if err != nil {
+			t.Fatalf("relay document does not validate: %v", err)
+		}
+		if doc.Netdev == nil || !doc.Netdev.DisableOffloads {
+			t.Fatalf("relay document must carry netdev.disableOffloads=true; got %+v", doc.Netdev)
+		}
+	})
+
+	t.Run("hashes stable for identical host tuning", func(t *testing.T) {
+		node := makeNode()
+		node.Spec.Address = testVPSAddress
+		node.Spec.Host.DisableNicOffloads = true
+		node.Spec.Host.KernelMaxSocketBufferBytes = 12345678
+		p1, err := BuildPlan(node, udpBinding, mockResolver{}, "priv", "pub", keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p2, err := BuildPlan(node, udpBinding, mockResolver{}, "priv", "pub", keys)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p1.PlanHash != p2.PlanHash || p1.RelayDocumentHash != p2.RelayDocumentHash {
+			t.Error("plan/relay hashes must be stable for identical host tuning input")
+		}
+	})
 }
 
 // TestBuildPlan_UplinkDocument verifies the shared uplink tunnelctl document:

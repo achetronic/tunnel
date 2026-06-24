@@ -285,9 +285,9 @@ func TestTeardown(t *testing.T) {
 		"ip link del wg-relay",
 		"rm -f " + tunnelctlBinPath,
 		"systemctl disable --now envoy",
-		"systemctl disable --now wg-relay.service",
+		"systemctl disable --now tunnel-boot.service",
 		"rm -f /etc/systemd/system/envoy.service",
-		"rm -f /etc/systemd/system/wg-relay.service",
+		"rm -f /etc/systemd/system/tunnel-boot.service",
 		"systemctl daemon-reload",
 		"rm -rf /etc/envoy",
 		"rm -f /etc/sysctl.d/99-tunnel.conf",
@@ -905,10 +905,10 @@ func TestEnroll_CorruptedStateReEnrolls(t *testing.T) {
 }
 
 // TestEnroll_RebootSurvivalAndConfigOrder verifies the enroll robustness fixes:
-// a wg-relay boot oneshot is installed and enabled, the Envoy unit depends on
-// it, the stale-temp sweep covers /etc/systemd/system, and CDS is written
-// before LDS so a write interruption never leaves a listener referencing an
-// absent cluster.
+// a tunnel-boot oneshot is installed and enabled, the Envoy unit depends on
+// it, the stale-temp sweep covers /etc/systemd/system, CDS is written before LDS
+// so a write interruption never leaves a listener referencing an absent cluster,
+// and the host sysctl drop-in carries ip_forward plus the socket-buffer ceiling.
 func TestEnroll_RebootSurvivalAndConfigOrder(t *testing.T) {
 	fake := sshexec.NewFakeExecutor()
 	fake.RunFunc = func(ctx context.Context, cmd string) (string, error) {
@@ -940,15 +940,16 @@ func TestEnroll_RebootSurvivalAndConfigOrder(t *testing.T) {
 	}
 
 	plan := &planner.Plan{
-		RelayDocument:     []byte(`{"version":1}`),
-		EnvoyLDS:          []byte("lds"),
-		EnvoyCDS:          []byte("cds"),
-		RelayDocumentHash: "h1",
-		TunnelctlDir:      tunnelctlFixtureDir(t),
-		EnvoyVersion:      "1.30.1",
-		EnvoyLDSHash:      "h2",
-		EnvoyCDSHash:      "h3",
-		RelayIP:           "10.200.0.1",
+		RelayDocument:              []byte(`{"version":1}`),
+		EnvoyLDS:                   []byte("lds"),
+		EnvoyCDS:                   []byte("cds"),
+		RelayDocumentHash:          "h1",
+		TunnelctlDir:               tunnelctlFixtureDir(t),
+		EnvoyVersion:               "1.30.1",
+		EnvoyLDSHash:               "h2",
+		EnvoyCDSHash:               "h3",
+		RelayIP:                    "10.200.0.1",
+		KernelMaxSocketBufferBytes: 8388608,
 	}
 
 	if _, err := Enroll(context.Background(), fake, plan, nil); err != nil {
@@ -957,22 +958,39 @@ func TestEnroll_RebootSurvivalAndConfigOrder(t *testing.T) {
 
 	joined := strings.Join(fake.Runs, "\n")
 
-	// FIX reboot: the wg-relay boot oneshot must be installed with a tunnelctl
-	// apply ExecStart for the relay document, the Envoy unit must depend on it,
-	// and wg-relay must be enabled so it runs on boot.
-	wgUnit := string(fake.Files["/etc/systemd/system/wg-relay.service"])
-	if !strings.Contains(wgUnit, "ExecStart="+tunnelctlBinPath+" apply --config "+relayDocumentPath) {
-		t.Fatalf("wg-relay.service missing tunnelctl apply ExecStart; got:\n%s", wgUnit)
+	// The tunnel-boot oneshot must be installed with a tunnelctl apply ExecStart
+	// for the relay document, the Envoy unit must depend on it, and tunnel-boot
+	// must be enabled so it runs on boot. The systemd unit is renamed; the
+	// WireGuard interface it brings up is still wg-relay.
+	bootUnit := string(fake.Files["/etc/systemd/system/tunnel-boot.service"])
+	if !strings.Contains(bootUnit, "ExecStart="+tunnelctlBinPath+" apply --config "+relayDocumentPath) {
+		t.Fatalf("tunnel-boot.service missing tunnelctl apply ExecStart; got:\n%s", bootUnit)
 	}
-	if !strings.Contains(wgUnit, "Type=oneshot") || !strings.Contains(wgUnit, "WantedBy=multi-user.target") {
-		t.Fatalf("wg-relay.service is not a boot oneshot; got:\n%s", wgUnit)
+	if !strings.Contains(bootUnit, "Type=oneshot") || !strings.Contains(bootUnit, "WantedBy=multi-user.target") {
+		t.Fatalf("tunnel-boot.service is not a boot oneshot; got:\n%s", bootUnit)
 	}
 	envoyUnit := string(fake.Files["/etc/systemd/system/envoy.service"])
-	if !strings.Contains(envoyUnit, "Requires=wg-relay.service") {
-		t.Fatalf("envoy.service must require wg-relay.service; got:\n%s", envoyUnit)
+	if !strings.Contains(envoyUnit, "Requires=tunnel-boot.service") {
+		t.Fatalf("envoy.service must require tunnel-boot.service; got:\n%s", envoyUnit)
 	}
-	if !strings.Contains(joined, "systemctl enable wg-relay.service") {
-		t.Fatalf("wg-relay.service was not enabled; runs:\n%s", joined)
+	if !strings.Contains(joined, "systemctl enable tunnel-boot.service") {
+		t.Fatalf("tunnel-boot.service was not enabled; runs:\n%s", joined)
+	}
+
+	// The sysctl drop-in is a single overwrite carrying ip_forward and the
+	// socket-buffer ceiling threaded from the plan, applied with sysctl -p.
+	sysctl := string(fake.Files[sysctlDropInPath])
+	for _, want := range []string{
+		"net.ipv4.ip_forward=1",
+		"net.core.rmem_max=8388608",
+		"net.core.wmem_max=8388608",
+	} {
+		if !strings.Contains(sysctl, want) {
+			t.Fatalf("sysctl drop-in missing %q; got:\n%s", want, sysctl)
+		}
+	}
+	if !strings.Contains(joined, "sysctl -p "+sysctlDropInPath) {
+		t.Fatalf("sysctl drop-in was not applied with sysctl -p; runs:\n%s", joined)
 	}
 
 	// FIX m-3: the sweep must cover /etc/systemd/system where unit temp files land.

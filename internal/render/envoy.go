@@ -13,6 +13,7 @@ import (
 
 const ldsTpl = `resources:
 {{- if .Listeners }}
+{{- $buf := .UDPSocketBufferBytes }}
 {{- range .Listeners }}
   - "@type": type.googleapis.com/envoy.config.listener.v3.Listener
     name: listener_{{ .Name }}
@@ -23,10 +24,25 @@ const ldsTpl = `resources:
         {{- if eq .Protocol "UDP" }}
         protocol: UDP
         {{- end }}
+    # enable_reuse_port lets the kernel load-balance across worker sockets; the
+    # older reuse_port field is deprecated and on Linux this is honored for both
+    # TCP and UDP.
+    enable_reuse_port: true
     {{- if eq .Protocol "UDP" }}
-    udp_listener_config:
-      downstream_socket_config:
-        prefer_gro: true
+    {{- if gt $buf 0 }}
+    # SO_RCVBUF (8) and SO_SNDBUF (7) at SOL_SOCKET (level 1), set before bind.
+    # UDP does not autotune its socket buffers, so they are raised explicitly to
+    # the configured kernel ceiling for high-throughput UDP listeners.
+    socket_options:
+      - level: 1
+        name: 8
+        int_value: {{ $buf }}
+        state: STATE_PREBIND
+      - level: 1
+        name: 7
+        int_value: {{ $buf }}
+        state: STATE_PREBIND
+    {{- end }}
     listener_filters:
       - name: envoy.filters.udp_listener.udp_proxy
         typed_config:

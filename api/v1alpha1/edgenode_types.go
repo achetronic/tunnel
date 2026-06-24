@@ -163,6 +163,32 @@ type HealthCheckSpec struct {
 	UnhealthyThreshold int32 `json:"unhealthyThreshold,omitempty"`
 }
 
+// HostSpec tunes the VPS as a machine (kernel and NIC), independent of the
+// proxy (edge). These knobs shape the data path at the operating-system level:
+// the kernel socket-buffer ceiling and the underlay NIC offloads. They are
+// applied to the host during enrollment and reconciliation and are orthogonal
+// to spec.edge, which configures the Envoy proxy itself.
+type HostSpec struct {
+	// KernelMaxSocketBufferBytes is the socket-buffer ceiling. It is threaded to
+	// both the kernel sysctls (net.core.rmem_max/wmem_max) and the
+	// SO_RCVBUF/SO_SNDBUF of Envoy's UDP listeners. UDP does not autotune, so
+	// this single knob raises the effective buffer for high-throughput UDP while
+	// TCP autotunes up to the same ceiling. Defaults to 26214400 (25MB).
+	// +kubebuilder:default=26214400
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	KernelMaxSocketBufferBytes int64 `json:"kernelMaxSocketBufferBytes,omitempty"`
+
+	// DisableNicOffloads turns GRO/GSO off on the underlay NIC carrying the
+	// WireGuard transport. It defaults false (offloads enabled) because disabling
+	// them degrades throughput for ordinary TCP/QUIC traffic; enable it only for
+	// encapsulated/non-uniform UDP payloads where GRO coalescing can corrupt
+	// datagram boundaries.
+	// +kubebuilder:default=false
+	// +optional
+	DisableNicOffloads bool `json:"disableNicOffloads,omitempty"`
+}
+
 // EdgeNodeSpec defines the desired state of a EdgeNode: a single VPS acting
 // as a public relay plus the in-cluster uplink that terminates its tunnels.
 type EdgeNodeSpec struct {
@@ -173,6 +199,12 @@ type EdgeNodeSpec struct {
 	// SSH holds the connection details used to enroll and manage the VPS.
 	// +required
 	SSH SSHSpec `json:"ssh"`
+
+	// Host tunes the VPS as a machine (kernel and NIC), independent of the proxy.
+	// Optional; sane defaults apply. Placed between SSH and Edge by convention:
+	// host-level OS tuning sits below the proxy configuration.
+	// +optional
+	Host HostSpec `json:"host,omitempty"`
 
 	// Edge configures the VPS-side edge proxy: how it health checks the uplink
 	// replicas and fails over between them. Optional; sane defaults apply.

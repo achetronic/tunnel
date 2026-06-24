@@ -230,6 +230,7 @@ func TestEnvoyValidate(t *testing.T) {
 	}
 
 	cfg := EnvoyConfig{
+		UDPSocketBufferBytes: 26214400,
 		Listeners: []EnvoyListener{
 			{
 				Name:       "tcp_plain",
