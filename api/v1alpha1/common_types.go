@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2026 Alby Hernández (Achetronic)
+// SPDX-FileCopyrightText: 2026 Alby Hernández <hola@achetronic.com>
 // SPDX-License-Identifier: Apache-2.0
 
 // This file holds API types shared by more than one Kind in this group. Types
